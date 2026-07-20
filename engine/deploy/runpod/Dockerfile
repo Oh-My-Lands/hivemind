@@ -33,12 +33,20 @@ RUN mkdir -p build && cd build && \
         -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" && \
     ninja
 
-# Copy the network model. The TensorRT plan is built from the ONNX on first run
-# and cached alongside it; plans are not portable across GPU arch / TRT version,
-# so restore a COPY of *_fp16_b16_gpu0_v1.engine only after generating one on the
-# target GPU (saves several minutes of startup).
+# Copy the network model, and any prebuilt TensorRT plan sitting beside it.
+#
+# Baking a plan is close to mandatory for serverless. Measured on an RTX 4090:
+# starting from a usable plan takes 0.6s, building one from the ONNX takes 236s.
+# A cold worker without a plan will blow the job timeout on its first request.
+#
+# Plans are tied to a GPU architecture and TensorRT major version, and are named
+# accordingly (..._sm89_trt10_v1.engine). A plan for the wrong hardware simply
+# misses the cache and is rebuilt, so shipping one is safe -- but only pays off
+# if the endpoint is pinned to the GPU type it was built for. Build it by
+# running the engine once on that GPU, then drop the .engine into networks/
+# before docker build.
 RUN mkdir -p /app/networks
-COPY networks/*.onnx /app/networks/
+COPY networks/ /app/networks/
 
 # Copy the RunPod handler. uci_parse.py sits beside it as a flat module, so it
 # must be copied too -- handler.py imports it at module scope and the container

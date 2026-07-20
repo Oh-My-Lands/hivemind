@@ -121,6 +121,36 @@ class TestParsing:
         assert parse_info_line(line)["time"] == 3409
 
 
+class TestVerifyReady:
+    """
+    The engine answers `uciok` before it knows whether any GPU engine loaded,
+    so a worker with an unusable TensorRT plan completes the UCI handshake,
+    exits 0, and fails every search. Only a real search proves readiness.
+    """
+
+    def _engine_returning(self, lines):
+        import handler as handler_module
+
+        eng = handler_module.HivemindEngine()
+        eng._send = lambda cmd: None
+        eng.set_position = lambda *a, **k: None
+        pending = list(lines)
+        eng._read_line = lambda timeout=1: pending.pop(0) if pending else None
+        return eng
+
+    def test_passes_when_a_search_returns(self):
+        self._engine_returning(["info depth 1", "bestmove (e2e4,pass)"]).verify_ready()
+
+    def test_raises_when_no_gpu_engine_loaded(self):
+        eng = self._engine_returning(["Error: No engines have been initialized!"])
+        with pytest.raises(RuntimeError, match="no GPU engine loaded"):
+            eng.verify_ready()
+
+    def test_raises_when_the_engine_says_nothing(self):
+        with pytest.raises(TimeoutError):
+            self._engine_returning([]).verify_ready(timeout=0.3)
+
+
 # --------------------------------------------------------------------- e2e
 
 ENGINE = os.environ.get("HIVEMIND_ENGINE")

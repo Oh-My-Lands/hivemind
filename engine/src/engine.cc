@@ -32,7 +32,21 @@ bool Engine::loadNetwork(const std::string& onnxFile, const std::string& engineF
     std::ifstream checkFile(engineFile, std::ios::binary);
     if (checkFile.good()) {
         checkFile.close();
-        return loadEngineFromFile(engineFile);
+        if (loadEngineFromFile(engineFile)) {
+            return true;
+        }
+        // A cached plan that will not deserialize is not fatal. Plans are tied
+        // to a GPU architecture and a TensorRT version, so one shipped in an
+        // image or left over from different hardware is simply unusable here.
+        //
+        // Falling through to a rebuild matters most for a prebuilt plan: before
+        // this, a mismatch left the process running with no engines loaded, so
+        // it started cleanly, exited 0, and failed every search. That looks
+        // healthy to any liveness check while serving nothing.
+        std::cerr << "Cached TensorRT plan at " << engineFile
+                  << " could not be deserialized (wrong GPU architecture or "
+                     "TensorRT version?); rebuilding from ONNX. This takes "
+                     "several minutes." << std::endl;
     }
     return buildEngineFromONNX(onnxFile) && saveEngineToFile(engineFile);
 }

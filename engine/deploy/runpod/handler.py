@@ -146,6 +146,37 @@ class HivemindEngine:
                     return lines
         raise TimeoutError(f"Timeout waiting for '{expected}'")
         
+    def verify_ready(self, timeout: float = 1800):
+        """
+        Confirms the engine can actually search, and raises if it cannot.
+
+        A UCI handshake is not evidence of anything: the engine answers `uciok`
+        before it knows whether any GPU engine loaded, so a worker whose
+        TensorRT plan failed to deserialize completes the handshake, reports no
+        error, and then fails every single search. Only a real search proves
+        the network is loaded.
+
+        The default timeout is generous because a missing or unusable plan
+        triggers a rebuild from ONNX, which takes minutes.
+        """
+        self.set_position("startpos")
+        self._send("go nodes 1")
+
+        start = time.time()
+        while time.time() - start < timeout:
+            line = self._read_line(timeout=1)
+            if line is None:
+                continue
+            if line.startswith("bestmove"):
+                print(f"Engine verified in {time.time() - start:.1f}s", flush=True)
+                return
+            if "No engines have been initialized" in line:
+                raise RuntimeError(
+                    "engine started but no GPU engine loaded -- the TensorRT "
+                    "plan is missing or unusable and could not be rebuilt"
+                )
+        raise TimeoutError("engine did not answer a 1-node search")
+
     def set_option(self, name: str, value: str):
         """Set a UCI option."""
         self._send(f"setoption name {name} value {value}")
@@ -482,4 +513,18 @@ if __name__ == "__main__":
             "deploy/runpod/dev_server.py for a local HTTP endpoint"
         )
     else:
+        # Load and verify the engine before accepting jobs. Two reasons:
+        #
+        #  - A worker that cannot search should fail loudly at startup rather
+        #    than accept traffic and error on every request.
+        #  - Loading lazily would make the first request pay the model load,
+        #    and if the TensorRT plan needs rebuilding that is minutes -- long
+        #    enough to blow the job timeout and look like a broken endpoint.
+        try:
+            engine.start()
+            engine.verify_ready()
+        except Exception as exc:
+            print(f"FATAL: engine failed to become ready: {exc}", flush=True)
+            raise SystemExit(1)
+
         runpod.serverless.start({"handler": handler})

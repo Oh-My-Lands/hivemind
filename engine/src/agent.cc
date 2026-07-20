@@ -165,6 +165,59 @@ Agent::~Agent() {
 }
 
 /**
+ * @brief Orders root children for MultiPV output.
+ */
+vector<size_t> Agent::rank_root_children(size_t numChildren) const {
+    vector<size_t> sortedIndices(numChildren);
+    for (size_t i = 0; i < numChildren; ++i) sortedIndices[i] = i;
+
+    auto childVisits = rootNode->get_child_visits();
+    sort(sortedIndices.begin(), sortedIndices.end(), [&](size_t a, size_t b) {
+        return childVisits[a] > childVisits[b];
+    });
+
+    // Hoist the move extract_best_move() would pick so PV 1 always agrees with
+    // bestmove -- solver-aware when proven, Q-weighted otherwise
+    int bestIdx = rootNode->get_best_move_idx_with_q_weight();
+    if (bestIdx >= 0) {
+        auto it = std::find(sortedIndices.begin(), sortedIndices.end(), static_cast<size_t>(bestIdx));
+        if (it != sortedIndices.end() && it != sortedIndices.begin()) {
+            sortedIndices.erase(it);
+            sortedIndices.insert(sortedIndices.begin(), static_cast<size_t>(bestIdx));
+        }
+    }
+    return sortedIndices;
+}
+
+/**
+ * @brief Prints a single UCI info line for one root child.
+ */
+void Agent::emit_pv_line(Board& board, size_t childIdx, int pvIdx, int multiPV,
+                         int depth, int nodes, int nps, int hashfull, size_t tbhits,
+                         double elapsedMs) {
+    auto children = rootNode->get_children();
+    string pv = extract_pv_from_child(board, static_cast<int>(childIdx), 20);
+    float childQ = rootNode->get_child_q(static_cast<int>(childIdx));
+    string scoreStr = format_uci_score(children[childIdx].get(), childQ);
+
+    cout << "info depth " << depth;
+    if (multiPV > 1) {
+        cout << " multipv " << (pvIdx + 1);
+    }
+    cout << " " << scoreStr
+         << " nodes " << nodes
+         << " nps " << nps
+         << " hashfull " << hashfull
+         << " tbhits " << tbhits
+         << " time " << static_cast<int>(elapsedMs);
+
+    if (!pv.empty()) {
+        cout << " pv " << pv;
+    }
+    cout << endl;
+}
+
+/**
  * @brief Unified search function for both UCI and self-play modes.
  */
 JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engines, 
@@ -273,22 +326,33 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
     // Periodic info output during search (UCI verbose mode only)
     // Also handles early stopping and time extension
     constexpr int MIN_INFO_INTERVAL_MS = 100;
-    if (options.verbose && moveTimeMs > 0) {
-        searchInfo.set_in_game(true);
-        constexpr float C = 180.0f;
-        constexpr float k = 1.56f;
+    // Node-limited searches report progress too, but skip time management
+    const bool nodeLimited = (moveTimeMs == 0 && targetNodes > 0);
+    if (options.verbose && (moveTimeMs > 0 || nodeLimited)) {
+        if (!nodeLimited) {
+            searchInfo.set_in_game(true);
+        }
         int lastReportedDepth = 0;
         float lastCheckEval = 0.0f;
         bool evalInitialized = false;
-        
-        while (running && searchInfo.elapsed() < searchInfo.get_effective_move_time()) {
+
+        auto limitReached = [&]() {
+            return nodeLimited
+                ? static_cast<size_t>(searchInfo.get_nodes_searched()) >= targetNodes
+                : searchInfo.elapsed() >= searchInfo.get_effective_move_time();
+        };
+
+        while (running && !limitReached()) {
             // Sleep for remaining time or MIN_INFO_INTERVAL_MS, whichever is smaller
-            double remainingMs = searchInfo.get_effective_move_time() - searchInfo.elapsed();
-            int sleepMs = std::min(MIN_INFO_INTERVAL_MS, std::max(1, static_cast<int>(remainingMs)));
+            int sleepMs = MIN_INFO_INTERVAL_MS;
+            if (!nodeLimited) {
+                double remainingMs = searchInfo.get_effective_move_time() - searchInfo.elapsed();
+                sleepMs = std::min(MIN_INFO_INTERVAL_MS, std::max(1, static_cast<int>(remainingMs)));
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
-            
-            if (!running || searchInfo.elapsed() >= searchInfo.get_effective_move_time()) break;
-            
+
+            if (!running || limitReached()) break;
+
             // Update NPS tracking
             searchInfo.update_nps();
             
@@ -336,8 +400,9 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
                         break;
                     }
                     
-                    // Early stopping check (visit-based)
-                    if (SearchParams::ENABLE_EARLY_STOPPING && searchInfo.get_nps() > 0) {
+                    // Early stopping check (visit-based); time-limited searches only,
+                    // a node budget is an explicit request for that many nodes
+                    if (!nodeLimited && SearchParams::ENABLE_EARLY_STOPPING && searchInfo.get_nps() > 0) {
                         double remaining = searchInfo.get_effective_move_time() - elapsedMs;
                         float projectedVisits = static_cast<float>(secondMax) + 
                                                static_cast<float>(remaining * searchInfo.get_nps() / 1000.0);
@@ -354,7 +419,7 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
                     }
                     
                     // Time extension check - extend if eval is falling
-                    if (SearchParams::ENABLE_TIME_EXTENSION && evalInitialized) {
+                    if (!nodeLimited && SearchParams::ENABLE_TIME_EXTENSION && evalInitialized) {
                         float evalDrop = lastCheckEval - bestQ;
                         if (evalDrop > SearchParams::TIME_EXTENSION_THRESHOLD) {
                             if (searchInfo.try_extend_time(SearchParams::TIME_EXTENSION_FACTOR, 
@@ -369,32 +434,13 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
                     // Only output when depth increases
                     if (depth > lastReportedDepth) {
                         lastReportedDepth = depth;
-                        
-                        // Use solver-aware selection for the best child to display
-                        int solverBestIdx = rootNode->get_best_move_idx_with_q_weight();
-                        size_t displayIdx = (solverBestIdx >= 0) 
-                            ? static_cast<size_t>(solverBestIdx) : static_cast<size_t>(firstIdx);
-                        
-                        // Output best line during search
-                        int numPVs = 1;
+
+                        // Output top N lines during search
+                        auto sortedIndices = rank_root_children(numChildren);
+                        int numPVs = min(options.multiPV, static_cast<int>(numChildren));
                         for (int pvIdx = 0; pvIdx < numPVs; ++pvIdx) {
-                            size_t childIdx = displayIdx;
-                            string pv = extract_pv_from_child(board, static_cast<int>(childIdx), 20);
-                            float childQ = rootNode->get_child_q(static_cast<int>(childIdx));
-                            string scoreStr = format_uci_score(children[childIdx].get(), childQ, true, C, k);
-                            
-                            cout << "info depth " << depth 
-                                 << " " << scoreStr
-                                 << " nodes " << nodes 
-                                 << " nps " << nps
-                                 << " hashfull " << hashfull
-                                 << " tbhits " << tbhits
-                                 << " time " << static_cast<int>(elapsedMs);
-                            
-                            if (!pv.empty()) {
-                                cout << " pv " << pv;
-                            }
-                            cout << endl;
+                            emit_pv_line(board, sortedIndices[pvIdx], pvIdx, numPVs,
+                                         depth, nodes, nps, hashfull, tbhits, elapsedMs);
                         }
                     }
                 }
@@ -544,63 +590,26 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
         size_t tbhits = (SearchParams::ENABLE_MCGS && transpositionTable) ? transpositionTable->getHits() : 0;
         int hashfull = (SearchParams::ENABLE_MCGS && transpositionTable) ? transpositionTable->getFullness() : 0;
         
-        // Convert Q-value [-1, 1] to centipawns using Lc0 tangent formula
-        constexpr float C = 180.0f;
-        constexpr float k = 1.56f;
-        
         // Multi-PV output: sort children by visits and output top N lines
         if (rootNode && rootNode->is_expanded()) {
             auto childVisits = rootNode->get_child_visits();
             auto children = rootNode->get_children();
             size_t numChildren = min(childVisits.size(), children.size());
-            
-            // Create sorted indices by visit count (descending)
-            vector<size_t> sortedIndices(numChildren);
-            for (size_t i = 0; i < numChildren; ++i) sortedIndices[i] = i;
-            sort(sortedIndices.begin(), sortedIndices.end(), [&](size_t a, size_t b) {
-                return childVisits[a] > childVisits[b];
-            });
-            
-            // When root is proven WIN/LOSS, prioritize the solver's best move as PV 1
-            if (rootNode->get_node_type() != NodeType::UNSOLVED) {
-                int solverIdx = rootNode->get_best_move_idx_with_q_weight();
-                if (solverIdx >= 0) {
-                    auto it = std::find(sortedIndices.begin(), sortedIndices.end(), static_cast<size_t>(solverIdx));
-                    if (it != sortedIndices.end() && it != sortedIndices.begin()) {
-                        sortedIndices.erase(it);
-                        sortedIndices.insert(sortedIndices.begin(), static_cast<size_t>(solverIdx));
-                    }
-                }
-            }
-            
+
+            auto sortedIndices = rank_root_children(numChildren);
+
             // Output up to multiPV lines
             int numPVs = min(options.multiPV, static_cast<int>(numChildren));
             for (int pvIdx = 0; pvIdx < numPVs; ++pvIdx) {
-                size_t childIdx = sortedIndices[pvIdx];
-                string pv = extract_pv_from_child(board, static_cast<int>(childIdx), 20);
-                float childQ = rootNode->get_child_q(static_cast<int>(childIdx));
-                string scoreStr = format_uci_score(children[childIdx].get(), childQ, true, C, k);
-                
-                cout << "info depth " << depth 
-                     << " multipv " << (pvIdx + 1)
-                     << " " << scoreStr
-                     << " nodes " << nodes 
-                     << " nps " << nps
-                     << " hashfull " << hashfull
-                     << " tbhits " << tbhits
-                     << " time " << static_cast<int>(elapsedMs);
-                
-                if (!pv.empty()) {
-                    cout << " pv " << pv;
-                }
-                cout << endl;
+                emit_pv_line(board, sortedIndices[pvIdx], pvIdx, numPVs,
+                             depth, nodes, nps, hashfull, tbhits, elapsedMs);
             }
         } else {
             // Fallback: single PV line with root Q
             string pv = extract_pv(board, 20);
             // Use root's own Q value (which is from root's perspective)
             float rootQ = rootNode ? rootNode->Q() : 0.0f;
-            string scoreStr = rootNode ? format_uci_score(rootNode.get(), rootQ, false, C, k) 
+            string scoreStr = rootNode ? format_uci_score(rootNode.get(), rootQ, false)
                                        : "score cp 0";
             
             cout << "info depth " << depth 

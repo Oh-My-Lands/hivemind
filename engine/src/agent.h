@@ -121,6 +121,27 @@ public:
     std::string extract_pv_from_child(Board& board, int childIdx, int maxDepth);
 
     /**
+     * @brief Orders root children for MultiPV output.
+     *
+     * Sorts by visit count descending. When the root is a proven WIN/LOSS, the
+     * solver's choice is hoisted to the front so PV 1 agrees with bestmove.
+     * @param numChildren Number of root children to rank.
+     * @return Child indices in display order.
+     */
+    std::vector<size_t> rank_root_children(size_t numChildren) const;
+
+    /**
+     * @brief Prints a single UCI info line for one root child.
+     * @param board The current board position.
+     * @param childIdx The root child the line describes.
+     * @param pvIdx Zero-based PV rank; emits "multipv N" when multiPV > 1.
+     * @param multiPV Total number of PV lines being reported.
+     */
+    void emit_pv_line(Board& board, size_t childIdx, int pvIdx, int multiPV,
+                      int depth, int nodes, int nps, int hashfull, size_t tbhits,
+                      double elapsedMs);
+
+    /**
      * @brief Extracts the best move from the root node after search.
      * @param board The board state for move formatting.
      * @return String representation of the best joint move.

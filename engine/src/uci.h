@@ -21,6 +21,11 @@ private:
     std::vector<std::unique_ptr<Engine>> engines;
     bool ongoingSearch = false;
     int multiPV = 1;  // Number of principal variations to display
+    int analysisBoard = BOARD_A;  // Board whose moves MultiPV lines are grouped by
+
+    // Stops any running search and reaps the thread. Blocks until it unwinds,
+    // so it must not be called from the reader loop's `stop` path.
+    void join_search();
 
 public:
     UCI();
@@ -34,6 +39,7 @@ public:
     void go(std::istringstream& is);
     void setoption(std::istringstream& is);
     void stop();
+    void ucinewgame();
     void position(std::istringstream& is);
     void policy();
     void loop();

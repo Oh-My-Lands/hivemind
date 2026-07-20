@@ -19,12 +19,21 @@ UCI::UCI() : mainSearchThread(nullptr) {
 }
 
 UCI::~UCI() {
-    // Join the main search thread if running.
-    if (mainSearchThread && mainSearchThread->joinable()) {
-        mainSearchThread->join();
-        delete mainSearchThread;
-    }
+    // Must signal before joining: an infinite search never ends on its own.
+    if (agent) agent->set_is_running(false);
+    join_search();
     // Engines will automatically be cleaned up when the vector is destroyed.
+}
+
+void UCI::join_search() {
+    if (mainSearchThread) {
+        if (mainSearchThread->joinable()) {
+            mainSearchThread->join();
+        }
+        delete mainSearchThread;
+        mainSearchThread = nullptr;
+    }
+    ongoingSearch = false;
 }
 
 void UCI::initializeEngines(const std::vector<int>& deviceIds) {
@@ -58,13 +67,24 @@ void UCI::initializeEngines(const std::vector<int>& deviceIds) {
 
 
 void UCI::stop() {
-    if (ongoingSearch) {
+    if (!ongoingSearch) return;
+
+    // Signal only. Joining here would block the reader loop until the search
+    // unwinds and printed its bestmove, which for an analysis client means
+    // `isready` and the next `go` stall behind it. The thread is reaped lazily
+    // by the next go() or by the destructor.
+    agent->set_is_running(false);
+    ongoingSearch = false;
+}
+
+void UCI::ucinewgame() {
+    // A new game invalidates the retained subtrees; without this the next
+    // search can reuse a tree built for an unrelated position.
+    if (agent) {
         agent->set_is_running(false);
-        mainSearchThread->join();
-        delete mainSearchThread;
-        mainSearchThread = nullptr;
-        ongoingSearch = false;
-    } 
+        join_search();
+        agent->clear_tree_reuse();
+    }
 }
 
 void UCI::position(istringstream& is) {
@@ -126,23 +146,25 @@ void UCI::go(std::istringstream& is) {
     std::string token;
     int moveTime = 0;
     size_t nodes = 0;
-    
+    bool infinite = false;
+
     // Parse go parameters
     while (is >> token) {
         if (token == "movetime") {
             is >> moveTime;
         } else if (token == "nodes") {
             is >> nodes;
+        } else if (token == "infinite") {
+            infinite = true;
         }
     }
-    
-    // Wait for any previous search to complete before starting a new one
-    if (mainSearchThread && mainSearchThread->joinable()) {
-        mainSearchThread->join();
-        delete mainSearchThread;
-        mainSearchThread = nullptr;
-    }
-    
+
+    // Stop and reap any previous search before starting a new one. The signal
+    // has to come first -- an infinite search would otherwise never return and
+    // the join would deadlock.
+    agent->set_is_running(false);
+    join_search();
+
     ongoingSearch = true;
     agent->set_is_running(true);
 
@@ -161,15 +183,17 @@ void UCI::go(std::istringstream& is) {
 
     // Build search options based on what was specified
     SearchOptions opts;
-    if (nodes > 0) {
-        opts = SearchOptions::uci(static_cast<int>(nodes), multiPV);
+    if (infinite) {
+        opts = SearchOptions::uci_infinite(multiPV, analysisBoard);
+    } else if (nodes > 0) {
+        opts = SearchOptions::uci(static_cast<int>(nodes), multiPV, analysisBoard);
         opts.moveTimeMs = 0;  // Node-based search
         opts.targetNodes = nodes;
     } else if (moveTime > 0) {
-        opts = SearchOptions::uci(moveTime, multiPV);
+        opts = SearchOptions::uci(moveTime, multiPV, analysisBoard);
     } else {
         // Default to 1 second if nothing specified
-        opts = SearchOptions::uci(1000, multiPV);
+        opts = SearchOptions::uci(1000, multiPV, analysisBoard);
     }
     
     // Launch the search thread
@@ -203,6 +227,15 @@ void UCI::setoption(std::istringstream& is) {
             multiPV = mpv;
             std::cout << "info string MultiPV set to " << multiPV << std::endl;
         }
+    } else if (name == "AnalysisBoard") {
+        // Which board's moves MultiPV lines are grouped by. Distinct from Team,
+        // which is a colour -- the engine plays both boards, but a human
+        // analysing is sitting at one of them.
+        int b = std::stoi(value);
+        if (b == 1 || b == 2) {
+            analysisBoard = (b == 1) ? BOARD_A : BOARD_B;
+            std::cout << "info string AnalysisBoard set to " << b << std::endl;
+        }
     } else if (name == "Team") {
         if (value == "white") {
             teamSide = Stockfish::WHITE;
@@ -223,6 +256,7 @@ void UCI::send_uci_response() {
     cout << "id author aminwoo\n" << endl;
     cout << "option name Hash type spin default 16 min 1 max 33554432" << endl;
     cout << "option name MultiPV type spin default 1 min 1 max 500" << endl;
+    cout << "option name AnalysisBoard type spin default 1 min 1 max 2" << endl;
     cout << "option name Team type combo default white var white var black" << endl;
     cout << "option name Mode type combo default go var sit var go" << endl;
     cout << "uciok" << endl;
@@ -319,6 +353,7 @@ void UCI::loop() {
         else if (token == "setoption")  setoption(is);
         else if (token == "position")   position(is);
         else if (token == "stop")       stop();
+        else if (token == "ucinewgame") ucinewgame();
         else if (token == "policy")     policy();
 
     } while (token != "quit"); // Command line args are one-shot

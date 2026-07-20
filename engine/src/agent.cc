@@ -9,6 +9,7 @@
 #include <random>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "joint_action.h"
@@ -165,46 +166,114 @@ Agent::~Agent() {
 }
 
 /**
- * @brief Orders root children for MultiPV output.
+ * @brief Groups root children by their move on the analysed board.
  */
-vector<size_t> Agent::rank_root_children(size_t numChildren) const {
-    vector<size_t> sortedIndices(numChildren);
-    for (size_t i = 0; i < numChildren; ++i) sortedIndices[i] = i;
+vector<Agent::RootMoveGroup> Agent::group_root_children(int analysisBoard) const {
+    vector<RootMoveGroup> groups;
+    if (!rootNode) return groups;
 
-    auto childVisits = rootNode->get_child_visits();
-    sort(sortedIndices.begin(), sortedIndices.end(), [&](size_t a, size_t b) {
-        return childVisits[a] > childVisits[b];
-    });
+    // One lock for the whole read: visits are summed across children below, so
+    // the totals have to agree with the per-child values they came from.
+    Node::ChildrenSnapshot snap = rootNode->snapshot_children();
+    if (snap.empty()) return groups;
 
-    // Hoist the move extract_best_move() would pick so PV 1 always agrees with
-    // bestmove -- solver-aware when proven, Q-weighted otherwise
+    // Which child index the solver / Q-weighted selection would play, so its
+    // group can be hoisted to PV 1 and agree with bestmove.
     int bestIdx = rootNode->get_best_move_idx_with_q_weight();
-    if (bestIdx >= 0) {
-        auto it = std::find(sortedIndices.begin(), sortedIndices.end(), static_cast<size_t>(bestIdx));
-        if (it != sortedIndices.end() && it != sortedIndices.begin()) {
-            sortedIndices.erase(it);
-            sortedIndices.insert(sortedIndices.begin(), static_cast<size_t>(bestIdx));
+
+    // Q is averaged across the group weighted by visits. That answers "how does
+    // this move score for me, averaging over what my partner might do", which is
+    // the marginal we want. Taking the group's best Q instead would report a
+    // best case that assumes an ideal partner.
+    std::unordered_map<int, size_t> groupByMove;  // encoded move -> index into groups
+    vector<float> weightedQSum;                   // parallel to groups
+
+    for (size_t i = 0; i < snap.size(); ++i) {
+        if (snap.visits[i] <= 0) continue;  // unvisited: Q is just the FPU prior
+
+        Stockfish::Move myMove = (analysisBoard == BOARD_A) ? snap.actions[i].moveA
+                                                            : snap.actions[i].moveB;
+        int key = static_cast<int>(myMove);
+
+        auto [it, inserted] = groupByMove.try_emplace(key, groups.size());
+        if (inserted) {
+            RootMoveGroup g;
+            g.myMove = myMove;
+            g.representativeIdx = i;
+            groups.push_back(g);
+            weightedQSum.push_back(0.0f);
+        }
+        RootMoveGroup& g = groups[it->second];
+
+        // The representative drives the PV, so it should be the pairing the
+        // search actually believes in.
+        if (snap.visits[i] > snap.visits[g.representativeIdx]) {
+            g.representativeIdx = i;
+        }
+        // ...unless this group holds the move we are going to report as
+        // bestmove, in which case the PV must start from that exact child.
+        if (bestIdx >= 0 && i == static_cast<size_t>(bestIdx)) {
+            g.representativeIdx = i;
+        }
+
+        g.totalVisits += snap.visits[i];
+        g.summedPrior += snap.priors[i];
+        weightedQSum[it->second] += snap.qValues[i] * static_cast<float>(snap.visits[i]);
+    }
+
+    for (size_t g = 0; g < groups.size(); ++g) {
+        if (groups[g].totalVisits > 0) {
+            groups[g].weightedQ = weightedQSum[g] / static_cast<float>(groups[g].totalVisits);
         }
     }
-    return sortedIndices;
+
+    sort(groups.begin(), groups.end(), [](const RootMoveGroup& a, const RootMoveGroup& b) {
+        return a.totalVisits > b.totalVisits;
+    });
+
+    // Hoist the group containing bestmove -- solver-aware when proven,
+    // Q-weighted otherwise. Visit order usually already agrees, but not when
+    // the solver overrides or the Q veto fires.
+    if (bestIdx >= 0 && static_cast<size_t>(bestIdx) < snap.size()) {
+        Stockfish::Move bestMyMove = (analysisBoard == BOARD_A) ? snap.actions[bestIdx].moveA
+                                                                : snap.actions[bestIdx].moveB;
+        auto it = std::find_if(groups.begin(), groups.end(),
+                               [&](const RootMoveGroup& g) { return g.myMove == bestMyMove; });
+        if (it != groups.end() && it != groups.begin()) {
+            std::rotate(groups.begin(), it, it + 1);
+        }
+    }
+
+    return groups;
 }
 
 /**
- * @brief Prints a single UCI info line for one root child.
+ * @brief Prints a single UCI info line for one candidate move.
  */
-void Agent::emit_pv_line(Board& board, size_t childIdx, int pvIdx, int multiPV,
+void Agent::emit_pv_line(Board& board, const RootMoveGroup& group, int pvIdx, int multiPV,
                          int depth, int nodes, int nps, int hashfull, size_t tbhits,
                          double elapsedMs) {
     auto children = rootNode->get_children();
-    string pv = extract_pv_from_child(board, static_cast<int>(childIdx), 20);
-    float childQ = rootNode->get_child_q(static_cast<int>(childIdx));
-    string scoreStr = format_uci_score(children[childIdx].get(), childQ);
+    if (group.representativeIdx >= children.size()) return;
+
+    string pv = extract_pv_from_child(board, static_cast<int>(group.representativeIdx), 20);
+    string scoreStr = format_uci_score(children[group.representativeIdx].get(), group.weightedQ);
+
+    // The score cp above saturates hard as |q| approaches 1 (the Lc0 tangent
+    // transform), and a Q backed by 12 visits reads the same as one backed by
+    // 40000. Report the raw numbers alongside it so both are visible.
+    std::ostringstream extra;
+    extra << std::fixed << std::setprecision(4)
+          << " q " << group.weightedQ
+          << " prior " << group.summedPrior;
 
     cout << "info depth " << depth;
     if (multiPV > 1) {
         cout << " multipv " << (pvIdx + 1);
     }
     cout << " " << scoreStr
+         << extra.str()
+         << " visits " << group.totalVisits
          << " nodes " << nodes
          << " nps " << nps
          << " hashfull " << hashfull
@@ -306,7 +375,15 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
         
         // Use time-based stopping if moveTimeMs > 0, otherwise use node-based
         // Workers check running flag and effective move time for time extension support
-        if (moveTimeMs > 0) {
+        if (options.infinite) {
+            // No budget to check -- only `stop` clearing the running flag ends this.
+            workers.emplace_back([this, &board, engine, st, teamHasTimeAdvantage]() {
+                Board localBoard(board);
+                while (running) {
+                    st->run_iteration(localBoard, engine, teamHasTimeAdvantage);
+                }
+            });
+        } else if (moveTimeMs > 0) {
             workers.emplace_back([this, &board, engine, st, teamHasTimeAdvantage, &searchInfo]() {
                 Board localBoard(board);
                 while (running && searchInfo.elapsed() < searchInfo.get_effective_move_time()) {
@@ -326,17 +403,24 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
     // Periodic info output during search (UCI verbose mode only)
     // Also handles early stopping and time extension
     constexpr int MIN_INFO_INTERVAL_MS = 100;
-    // Node-limited searches report progress too, but skip time management
-    const bool nodeLimited = (moveTimeMs == 0 && targetNodes > 0);
-    if (options.verbose && (moveTimeMs > 0 || nodeLimited)) {
-        if (!nodeLimited) {
+    // Longest an analysis client should wait to hear anything. Depth can stall
+    // for a long time on a hard position, and a UI streaming this needs to see
+    // the numbers keep moving.
+    constexpr double MAX_INFO_SILENCE_MS = 1000.0;
+    // Node-limited and infinite searches report progress too, but skip time management
+    const bool nodeLimited = (!options.infinite && moveTimeMs == 0 && targetNodes > 0);
+    const bool unmanaged = nodeLimited || options.infinite;
+    if (options.verbose && (options.infinite || moveTimeMs > 0 || nodeLimited)) {
+        if (!unmanaged) {
             searchInfo.set_in_game(true);
         }
         int lastReportedDepth = 0;
+        double lastInfoEmitMs = 0.0;
         float lastCheckEval = 0.0f;
         bool evalInitialized = false;
 
         auto limitReached = [&]() {
+            if (options.infinite) return false;  // only `stop` ends this
             return nodeLimited
                 ? static_cast<size_t>(searchInfo.get_nodes_searched()) >= targetNodes
                 : searchInfo.elapsed() >= searchInfo.get_effective_move_time();
@@ -345,7 +429,7 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
         while (running && !limitReached()) {
             // Sleep for remaining time or MIN_INFO_INTERVAL_MS, whichever is smaller
             int sleepMs = MIN_INFO_INTERVAL_MS;
-            if (!nodeLimited) {
+            if (!unmanaged) {
                 double remainingMs = searchInfo.get_effective_move_time() - searchInfo.elapsed();
                 sleepMs = std::min(MIN_INFO_INTERVAL_MS, std::max(1, static_cast<int>(remainingMs)));
             }
@@ -400,9 +484,11 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
                         break;
                     }
                     
-                    // Early stopping check (visit-based); time-limited searches only,
-                    // a node budget is an explicit request for that many nodes
-                    if (!nodeLimited && SearchParams::ENABLE_EARLY_STOPPING && searchInfo.get_nps() > 0) {
+                    // Early stopping check (visit-based); time-limited searches only.
+                    // A node budget is an explicit request for that many nodes, and
+                    // an infinite search has no move time to compare against -- its
+                    // remaining time would come out negative and stop it at once.
+                    if (!unmanaged && SearchParams::ENABLE_EARLY_STOPPING && searchInfo.get_nps() > 0) {
                         double remaining = searchInfo.get_effective_move_time() - elapsedMs;
                         float projectedVisits = static_cast<float>(secondMax) + 
                                                static_cast<float>(remaining * searchInfo.get_nps() / 1000.0);
@@ -418,8 +504,9 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
                         }
                     }
                     
-                    // Time extension check - extend if eval is falling
-                    if (!nodeLimited && SearchParams::ENABLE_TIME_EXTENSION && evalInitialized) {
+                    // Time extension check - extend if eval is falling.
+                    // Meaningless without a time budget to extend.
+                    if (!unmanaged && SearchParams::ENABLE_TIME_EXTENSION && evalInitialized) {
                         float evalDrop = lastCheckEval - bestQ;
                         if (evalDrop > SearchParams::TIME_EXTENSION_THRESHOLD) {
                             if (searchInfo.try_extend_time(SearchParams::TIME_EXTENSION_FACTOR, 
@@ -431,15 +518,18 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
                         lastCheckEval = bestQ;
                     }
                     
-                    // Only output when depth increases
-                    if (depth > lastReportedDepth) {
+                    // Report on a new depth, or when we have been quiet too long
+                    bool deeper = depth > lastReportedDepth;
+                    bool stale = (elapsedMs - lastInfoEmitMs) >= MAX_INFO_SILENCE_MS;
+                    if (deeper || stale) {
                         lastReportedDepth = depth;
+                        lastInfoEmitMs = elapsedMs;
 
                         // Output top N lines during search
-                        auto sortedIndices = rank_root_children(numChildren);
-                        int numPVs = min(options.multiPV, static_cast<int>(numChildren));
+                        auto groups = group_root_children(options.analysisBoard);
+                        int numPVs = min(options.multiPV, static_cast<int>(groups.size()));
                         for (int pvIdx = 0; pvIdx < numPVs; ++pvIdx) {
-                            emit_pv_line(board, sortedIndices[pvIdx], pvIdx, numPVs,
+                            emit_pv_line(board, groups[pvIdx], pvIdx, numPVs,
                                          depth, nodes, nps, hashfull, tbhits, elapsedMs);
                         }
                     }
@@ -590,31 +680,45 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
         size_t tbhits = (SearchParams::ENABLE_MCGS && transpositionTable) ? transpositionTable->getHits() : 0;
         int hashfull = (SearchParams::ENABLE_MCGS && transpositionTable) ? transpositionTable->getFullness() : 0;
         
-        // Multi-PV output: sort children by visits and output top N lines
-        if (rootNode && rootNode->is_expanded()) {
-            auto childVisits = rootNode->get_child_visits();
-            auto children = rootNode->get_children();
-            size_t numChildren = min(childVisits.size(), children.size());
-
-            auto sortedIndices = rank_root_children(numChildren);
-
+        // Multi-PV output: one line per distinct move on the analysed board.
+        // A search too short to visit any child yields no groups, so fall
+        // through to the root-Q line rather than reporting nothing.
+        auto groups = (rootNode && rootNode->is_expanded())
+                          ? group_root_children(options.analysisBoard)
+                          : vector<RootMoveGroup>{};
+        if (!groups.empty()) {
             // Output up to multiPV lines
-            int numPVs = min(options.multiPV, static_cast<int>(numChildren));
+            int numPVs = min(options.multiPV, static_cast<int>(groups.size()));
             for (int pvIdx = 0; pvIdx < numPVs; ++pvIdx) {
-                emit_pv_line(board, sortedIndices[pvIdx], pvIdx, numPVs,
+                emit_pv_line(board, groups[pvIdx], pvIdx, numPVs,
                              depth, nodes, nps, hashfull, tbhits, elapsedMs);
+            }
+
+            // Progressive widening bounds how many root children exist at all
+            // (ceil(n^0.3)), and grouping collapses those further, so a short
+            // search can silently return fewer lines than were asked for.
+            if (numPVs < options.multiPV) {
+                cout << "info string MultiPV " << options.multiPV << " requested but only "
+                     << numPVs << " distinct move(s) searched; increase the search budget"
+                     << endl;
             }
         } else {
             // Fallback: single PV line with root Q
             string pv = extract_pv(board, 20);
-            // Use root's own Q value (which is from root's perspective)
-            float rootQ = rootNode ? rootNode->Q() : 0.0f;
+            // Use root's own Q value (which is from root's perspective).
+            // Q() is valueSum / (1 + visits) and valueSum starts at -1.0f, so an
+            // unvisited root reports a spurious loss; report 0 until it has a
+            // real sample. (Fixing the initialiser would change search
+            // behaviour, so it is left alone here.)
+            float rootQ = (rootNode && rootNode->get_visits() > 0) ? rootNode->Q() : 0.0f;
             string scoreStr = rootNode ? format_uci_score(rootNode.get(), rootQ, false)
                                        : "score cp 0";
-            
-            cout << "info depth " << depth 
+
+            cout << "info depth " << depth
                  << " " << scoreStr
-                 << " nodes " << nodes 
+                 << " q " << std::fixed << std::setprecision(4) << rootQ
+                 << std::defaultfloat
+                 << " nodes " << nodes
                  << " nps " << nps
                  << " hashfull " << hashfull
                  << " tbhits " << tbhits

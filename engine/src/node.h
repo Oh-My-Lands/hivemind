@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <memory>
@@ -366,6 +367,53 @@ public:
     std::vector<float> get_child_value_sums() const {
         std::shared_lock<std::shared_mutex> guard(nodeMutex);
         return childValueSum;
+    }
+
+    /**
+     * @brief A consistent view of every child's stats, taken under a single lock.
+     *
+     * Calling get_children() / get_child_visits() / get_joint_action() in
+     * sequence re-acquires the lock each time, so a concurrent search can
+     * change the node in between and the caller ends up combining stats from
+     * different moments. That is tolerable for a single info line but not for
+     * MultiPV grouping, where visits are summed across children and the totals
+     * must agree with the per-child values they came from.
+     *
+     * Arrays are parallel and all truncated to the same length.
+     */
+    struct ChildrenSnapshot {
+        std::vector<std::shared_ptr<Node>> children;
+        std::vector<JointActionCandidate> actions;
+        std::vector<int> visits;
+        std::vector<float> priors;
+        std::vector<float> qValues;   // from this node's perspective
+
+        size_t size() const { return children.size(); }
+        bool empty() const { return children.empty(); }
+    };
+
+    ChildrenSnapshot snapshot_children() const {
+        std::shared_lock<std::shared_mutex> guard(nodeMutex);
+
+        // childVisits/childPriors/qValues are sized on expansion, but a child
+        // can be in `children` a moment before its stats land, so clamp to the
+        // shortest array rather than assuming they match.
+        size_t n = children.size();
+        n = std::min(n, childVisits.size());
+        n = std::min(n, childPriors.size());
+        n = std::min(n, qValues.size());
+        n = std::min(n, candidateGenerator.generatedCount());
+
+        ChildrenSnapshot snap;
+        snap.children.assign(children.begin(), children.begin() + n);
+        snap.visits.assign(childVisits.begin(), childVisits.begin() + n);
+        snap.priors.assign(childPriors.begin(), childPriors.begin() + n);
+        snap.qValues.assign(qValues.begin(), qValues.begin() + n);
+        snap.actions.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            snap.actions.push_back(candidateGenerator.getGenerated(i));
+        }
+        return snap;
     }
 
     bool is_expanded() {

@@ -18,26 +18,39 @@
  * @brief Search options to configure Agent::run_search behavior.
  */
 struct SearchOptions {
-    // Stopping conditions (one must be set)
+    // Stopping conditions (one must be set, unless infinite)
     size_t targetNodes = 0;      // Stop after this many nodes (0 = use time)
     int moveTimeMs = 0;          // Stop after this many milliseconds (0 = use nodes)
-    
+    bool infinite = false;       // Search until stopped; ignores targetNodes/moveTimeMs
+
     // UCI mode options
     bool verbose = false;        // Output UCI info strings (info, bestmove)
     bool checkMateIn1 = false;   // Check for immediate mate before search
     int multiPV = 1;             // Number of principal variations to output
-    
+    int analysisBoard = 0;       // Board whose moves MultiPV lines are grouped by (0 = A, 1 = B)
+
     // Self-play exploration options  
     float dirichletAlpha = 0.0f;   // Dirichlet noise alpha (0 = no noise)
     float dirichletEpsilon = 0.0f; // Fraction of prior to replace with noise (0 = no noise)
     
     // Convenience constructors
-    static SearchOptions uci(int moveTimeMs, int multiPV = 1) {
+    static SearchOptions uci(int moveTimeMs, int multiPV = 1, int analysisBoard = 0) {
         SearchOptions opts;
         opts.moveTimeMs = moveTimeMs;
         opts.verbose = true;
         opts.checkMateIn1 = true;
         opts.multiPV = multiPV;
+        opts.analysisBoard = analysisBoard;
+        return opts;
+    }
+
+    static SearchOptions uci_infinite(int multiPV = 1, int analysisBoard = 0) {
+        SearchOptions opts;
+        opts.infinite = true;
+        opts.verbose = true;
+        opts.checkMateIn1 = true;
+        opts.multiPV = multiPV;
+        opts.analysisBoard = analysisBoard;
         return opts;
     }
     
@@ -121,23 +134,44 @@ public:
     std::string extract_pv_from_child(Board& board, int childIdx, int maxDepth);
 
     /**
-     * @brief Orders root children for MultiPV output.
+     * @brief One candidate move on the board being analysed.
      *
-     * Sorts by visit count descending. When the root is a proven WIN/LOSS, the
-     * solver's choice is hoisted to the front so PV 1 agrees with bestmove.
-     * @param numChildren Number of root children to rank.
-     * @return Child indices in display order.
+     * The search works on joint actions (moveA, moveB), so a single move on our
+     * board appears once per partner-board pairing. For analysis we want one
+     * line per distinct move of ours, so those children are collapsed into a
+     * group and their statistics combined.
      */
-    std::vector<size_t> rank_root_children(size_t numChildren) const;
+    struct RootMoveGroup {
+        Stockfish::Move myMove = Stockfish::MOVE_NONE;  // MOVE_NONE = sit
+        int totalVisits = 0;        // summed over every partner pairing
+        float weightedQ = 0.0f;     // visit-weighted mean Q, parent's perspective
+        float summedPrior = 0.0f;   // marginal policy for myMove
+        size_t representativeIdx = 0;  // most-visited child in the group; drives the PV
+    };
 
     /**
-     * @brief Prints a single UCI info line for one root child.
-     * @param board The current board position.
-     * @param childIdx The root child the line describes.
-     * @param pvIdx Zero-based PV rank; emits "multipv N" when multiPV > 1.
-     * @param multiPV Total number of PV lines being reported.
+     * @brief Groups root children by their move on the analysed board.
+     *
+     * Groups are ordered by total visits descending, except that the group
+     * containing the move extract_best_move() would pick is hoisted to the
+     * front so PV 1 always agrees with bestmove.
+     *
+     * @param analysisBoard Board whose moves to group by (0 = A, 1 = B).
+     * @return Groups in display order; empty if the root is not expanded.
      */
-    void emit_pv_line(Board& board, size_t childIdx, int pvIdx, int multiPV,
+    std::vector<RootMoveGroup> group_root_children(int analysisBoard) const;
+
+    /**
+     * @brief Prints a single UCI info line for one candidate move.
+     *
+     * Emits the standard "score cp" alongside the raw q, visit count and policy
+     * prior. The extra fields are non-standard, but this engine already reports
+     * joint moves that no stock UCI GUI parses, and Q is close to meaningless
+     * without the visit count that backs it.
+     *
+     * @param pvIdx Zero-based PV rank; emits "multipv N" when multiPV > 1.
+     */
+    void emit_pv_line(Board& board, const RootMoveGroup& group, int pvIdx, int multiPV,
                       int depth, int nodes, int nps, int hashfull, size_t tbhits,
                       double elapsedMs);
 

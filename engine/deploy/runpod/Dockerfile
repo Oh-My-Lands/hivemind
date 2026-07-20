@@ -33,10 +33,12 @@ RUN mkdir -p build && cd build && \
         -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" && \
     ninja
 
-# Copy the network model (ONNX and pre-built TensorRT engine for fast startup)
+# Copy the network model. The TensorRT plan is built from the ONNX on first run
+# and cached alongside it; plans are not portable across GPU arch / TRT version,
+# so restore a COPY of *_fp16_b16_gpu0_v1.engine only after generating one on the
+# target GPU (saves several minutes of startup).
 RUN mkdir -p /app/networks
 COPY networks/*.onnx /app/networks/
-COPY networks/*_fp16_b16_gpu0_v1.engine /app/networks/
 
 # Copy the RunPod handler
 COPY deploy/runpod/handler.py /app/handler.py

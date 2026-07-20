@@ -2,12 +2,17 @@
 
 Streams engine analysis to a browser client over a WebSocket.
 
-This is a **different deployment shape** from `../runpod/`, which is why it
-lives in its own directory. The serverless handler is request/response: it
-fires `go movetime` and blocks collecting output until `bestmove`. Analysis
-wants a long-lived search whose `info` lines arrive as they are produced and
-which can be stopped at any moment, so this runs as a persistent server on a
-GPU pod rather than as a serverless worker.
+> **This is the secondary path.** The primary deployment is `../runpod/`, which
+> returns one settled result per request and needs no long-lived server. For
+> local development prefer `../runpod/dev_server.py`: it wraps the same handler
+> the deployed endpoint runs, so development and production cannot drift.
+>
+> Use this bridge only when you want to watch lines refine live as a search
+> deepens, or stop a search partway. Both need a persistent process, so it only
+> makes sense on a pod you are already running.
+
+Parsing is shared with the handler (`../runpod/uci_parse.py`) rather than
+duplicated, so the two cannot disagree about the engine's output format.
 
 ## Running
 

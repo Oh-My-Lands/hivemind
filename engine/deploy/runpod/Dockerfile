@@ -40,8 +40,11 @@ RUN mkdir -p build && cd build && \
 RUN mkdir -p /app/networks
 COPY networks/*.onnx /app/networks/
 
-# Copy the RunPod handler
+# Copy the RunPod handler. uci_parse.py sits beside it as a flat module, so it
+# must be copied too -- handler.py imports it at module scope and the container
+# fails to start without it.
 COPY deploy/runpod/handler.py /app/handler.py
+COPY deploy/runpod/uci_parse.py /app/uci_parse.py
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

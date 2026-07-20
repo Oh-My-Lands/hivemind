@@ -2,12 +2,14 @@
 """
 WebSocket bridge for the Hivemind bughouse engine.
 
-The serverless handler next door (deploy/runpod/handler.py) is strictly
-request/response: it fires `go movetime` and blocks collecting output until
-`bestmove`. Analysis needs the opposite shape -- a long-lived search whose
-`info` lines stream out as they are produced, and which can be stopped at any
-time. So this is a separate deployment, meant for a persistent GPU pod rather
-than a serverless worker.
+SECONDARY PATH. The primary deployment is deploy/runpod/, which returns one
+settled result per request and needs no long-lived server. Prefer
+deploy/runpod/dev_server.py for local development, since it exercises the same
+handler the deployed endpoint runs.
+
+This exists for the case that one does not cover: watching lines refine live
+while a search deepens, and stopping it partway. It needs a persistent process,
+so it only makes sense on a pod you are already running.
 
 Protocol, client -> server (JSON text frames):
 
@@ -37,125 +39,31 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
+import sys
 import time
 from collections import deque
 from typing import Any, Dict, List, Optional
 
 import websockets
 
+# Parsing lives with the serverless handler, which is the primary deployment.
+# Shared rather than duplicated so the two cannot disagree about the engine's
+# output format.
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runpod")
+)
+from uci_parse import (  # noqa: E402
+    parse_bestmove_line,
+    parse_info_line,
+    parse_pv,
+)
+
 LOG = logging.getLogger("ws_bridge")
-
-# Fields the engine emits as plain integers / floats after their name token.
-_INT_FIELDS = {
-    "depth",
-    "multipv",
-    "visits",
-    "nodes",
-    "nps",
-    "hashfull",
-    "tbhits",
-    "time",
-}
-_FLOAT_FIELDS = {"q", "prior"}
-
-# A PV entry is a joint action over both boards, e.g. "(d2d4,pass)" or
-# "(g5e7,P@e6)" -- drops use Fairy-Stockfish's piece@square form.
-_JOINT_ACTION = re.compile(r"\(([^,()]*),([^,()]*)\)")
-
-# "sit"/"pass" is a first-class action in this engine; it is not a move.
-_PASS = "pass"
 
 MAX_MULTIPV = 100
 MAX_MOVETIME_MS = 600_000
 MAX_NODES = 100_000_000
-
-
-def _move_or_none(token: str) -> Optional[str]:
-    token = token.strip()
-    return None if token in ("", _PASS, "none", "(none)") else token
-
-
-def parse_pv(text: str) -> List[Dict[str, Optional[str]]]:
-    """Parses a PV of joint actions into per-ply {a, b} pairs."""
-    return [
-        {"a": _move_or_none(a), "b": _move_or_none(b)}
-        for a, b in _JOINT_ACTION.findall(text)
-    ]
-
-
-def parse_info_line(line: str) -> Optional[Dict[str, Any]]:
-    """
-    Parses one UCI `info` line into a dict, or returns None if it is not one.
-
-    The engine interleaves `info string ...` diagnostics with real PV lines, so
-    those are recognised separately rather than being fed through the field
-    scanner. Unknown tokens are skipped rather than raising: this has to keep
-    working when the engine grows a field the bridge has not been taught.
-    """
-    if not line.startswith("info"):
-        return None
-
-    if line.startswith("info string"):
-        return {"kind": "string", "message": line[len("info string"):].strip()}
-
-    tokens = line.split()
-    out: Dict[str, Any] = {"kind": "pv"}
-    i = 1
-    while i < len(tokens):
-        token = tokens[i]
-
-        if token == "pv":
-            # `pv` is always last and consumes the rest of the line.
-            out["pv"] = parse_pv(" ".join(tokens[i + 1:]))
-            break
-
-        if token == "score" and i + 2 < len(tokens):
-            kind, raw = tokens[i + 1], tokens[i + 2]
-            try:
-                out["score"] = {"kind": kind, "value": int(raw)}
-            except ValueError:
-                LOG.debug("unparsable score %r in: %s", raw, line)
-            i += 3
-            continue
-
-        if i + 1 < len(tokens) and token in _INT_FIELDS:
-            try:
-                out[token] = int(tokens[i + 1])
-            except ValueError:
-                LOG.debug("unparsable int for %s in: %s", token, line)
-            i += 2
-            continue
-
-        if i + 1 < len(tokens) and token in _FLOAT_FIELDS:
-            try:
-                out[token] = float(tokens[i + 1])
-            except ValueError:
-                LOG.debug("unparsable float for %s in: %s", token, line)
-            i += 2
-            continue
-
-        i += 1
-
-    # A line with no depth is not a PV line we can do anything useful with.
-    if "depth" not in out:
-        return None
-    out.setdefault("multipv", 1)
-    return out
-
-
-def parse_bestmove_line(line: str) -> Optional[Dict[str, Optional[str]]]:
-    """Parses `bestmove (moveA,moveB)` into its two halves."""
-    if not line.startswith("bestmove"):
-        return None
-    match = _JOINT_ACTION.search(line)
-    if not match:
-        return {"moveA": None, "moveB": None}
-    return {
-        "moveA": _move_or_none(match.group(1)),
-        "moveB": _move_or_none(match.group(2)),
-    }
 
 
 class OutboundBuffer:

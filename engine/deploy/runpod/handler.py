@@ -21,14 +21,26 @@ import threading
 import queue
 from typing import Dict, Any, Optional, List
 
-import runpod
+from uci_parse import (
+    collect_final_lines,
+    parse_bestmove_line,
+    parse_info_line,
+)
+
+try:
+    import runpod
+except ImportError:  # the dev server and tests do not need the SDK
+    runpod = None
 
 # Configuration
 ENGINE_PATH = os.environ.get('ENGINE_PATH', '/app/build/hivemind')
 NETWORKS_DIR = os.environ.get('NETWORKS_DIR', '/app/networks')
+ENGINE_CWD = os.environ.get('ENGINE_CWD', '/app')
 DEFAULT_NODES = 800
 DEFAULT_MOVE_TIME_MS = 1000
 MAX_MOVE_TIME_MS = 30000  # 30 second max
+MAX_NODES = 50_000_000
+MAX_MULTIPV = 100
 
 
 class HivemindEngine:
@@ -40,6 +52,8 @@ class HivemindEngine:
         self.output_queue: queue.Queue = queue.Queue()
         self.reader_thread: Optional[threading.Thread] = None
         self.running = False
+        # Tracked so a Mode change can force a fresh tree; see handler().
+        self.current_mode: Optional[str] = None
         
     def _reader_worker(self):
         """Background thread to read engine output."""
@@ -70,7 +84,9 @@ class HivemindEngine:
             stderr=subprocess.STDOUT,  # Merge stderr into stdout
             text=True,
             bufsize=1,
-            cwd="/app"  # Run from /app where networks/ directory is located
+            # The engine resolves ./networks against its working directory.
+            # /app is where the image puts it; override for local runs.
+            cwd=ENGINE_CWD,
         )
         
         # Start reader thread
@@ -200,29 +216,30 @@ class HivemindEngine:
             "depth": None,
             "time_ms": None
         }
-        
+
         start = time.time()
         while time.time() - start < timeout:
             line = self._read_line(timeout=1)
             if not line:
                 continue
-                
+
             if line.startswith("info"):
                 info_lines.append(line)
                 result["info"].append(line)
-                
+
                 # Parse info line
                 self._parse_info(line, result)
-                
+
             elif line.startswith("bestmove"):
                 # Parse bestmove: "bestmove (e2e4,d2d4)"
                 match = re.search(r'bestmove\s+(\([^)]+\)|\S+)', line)
                 if match:
                     result["bestmove"] = match.group(1)
-                    
+
+                result["raw_info"] = info_lines
                 result["time_ms"] = int((time.time() - start) * 1000)
                 return result
-                
+
         raise TimeoutError("Timeout waiting for bestmove")
         
     def _parse_info(self, line: str, result: Dict):
@@ -313,51 +330,82 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         # Set team if provided
         team = job_input.get("team", "white")
         engine.set_option("Team", team)
-        
-        # Set mode if provided
+
+        # Mode feeds an NN input plane and is hashed into the position key, so a
+        # change invalidates any retained tree. Reusing one across a change would
+        # mix evaluations made under two different rule sets.
         mode = job_input.get("mode", "go")
+        if engine.current_mode is not None and engine.current_mode != mode:
+            engine.new_game()
         engine.set_option("Mode", mode)
-        
-        # Set MultiPV if requested
-        multipv = job_input.get("multipv", False)
-        if multipv:
-            engine.set_option("MultiPV", "5")
-        else:
-            engine.set_option("MultiPV", "1")
-            
+        engine.current_mode = mode
+
+        # How many candidate moves to rank. `multipv: true` is still accepted
+        # for callers written against the old boolean flag.
+        multipv = job_input.get("multipv", 1)
+        if isinstance(multipv, bool):
+            multipv = 5 if multipv else 1
+        multipv = max(1, min(int(multipv), MAX_MULTIPV))
+        engine.set_option("MultiPV", str(multipv))
+
+        # Which board the caller is sitting at. The engine plays both, but the
+        # ranked lines are grouped by the move on this one.
+        analysis_board = int(job_input.get("analysisBoard", 1))
+        if analysis_board not in (1, 2):
+            return {"error": "analysisBoard must be 1 or 2"}
+        engine.set_option("AnalysisBoard", str(analysis_board))
+
         # Set position - moves can be string or list
         moves = job_input.get("moves", "")
         if isinstance(moves, str) and moves:
             moves = moves.split()
         engine.set_position(fen, moves if moves else None)
-        
-        # Get search parameters
+
+        # Search budget: nodes is reproducible across machines, movetime is not.
+        nodes = job_input.get("nodes", 0)
         movetime = job_input.get("movetime", 0)
-            
-        # Clamp for safety
-        if movetime > MAX_MOVE_TIME_MS:
-            movetime = MAX_MOVE_TIME_MS
-        if not movetime:
-            movetime = DEFAULT_MOVE_TIME_MS
-            
-        # Run search
-        result = engine.go(movetime=movetime)
-        
+
+        if nodes:
+            nodes = max(1, min(int(nodes), MAX_NODES))
+            result = engine.go(nodes=nodes)
+        else:
+            movetime = min(int(movetime), MAX_MOVE_TIME_MS) or DEFAULT_MOVE_TIME_MS
+            result = engine.go(movetime=movetime)
+
         # Parse joint action into individual moves
         bestmove = result.get("bestmove", "(none)")
         moveA, moveB = parse_joint_action(bestmove)
-        
-        return {
+
+        # The settled ranking: one entry per candidate move on the analysed
+        # board, best first.
+        lines = collect_final_lines(result.get("raw_info", []), analysis_board)
+
+        response = {
             "bestmove": bestmove,
             "moveA": moveA,
             "moveB": moveB,
+            "lines": lines,
+            "analysisBoard": analysis_board,
             "eval": result.get("eval"),
             "depth": result.get("depth"),
             "nodes": result.get("nodes"),
             "time_ms": result.get("time_ms"),
             "mate": result.get("mate"),
-            "info": result.get("info", [])
         }
+
+        # Progressive widening bounds how many distinct root moves exist, and
+        # grouping collapses them further, so a short search can return fewer
+        # lines than asked for. Say so rather than leaving it to be guessed.
+        if len(lines) < multipv:
+            response["note"] = (
+                f"requested {multipv} lines, search produced {len(lines)}; "
+                "increase the search budget for more"
+            )
+
+        if job_input.get("includeRawInfo"):
+            response["info"] = result.get("raw_info", [])
+
+        return response
             
     except Exception as e:
         import traceback
@@ -401,29 +449,37 @@ def parse_joint_action(bestmove: str) -> tuple:
     return (moveA, moveB)
 
 
-# For local testing
-if __name__ == "__main__":
-    import sys
-    
-    # Test the handler locally
+def _selftest() -> None:
+    """One-off local search, for checking a build by hand."""
     test_job = {
         "input": {
-            "action": "move",
-            "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            "movetime": 1000,
-            "team": "white"
+            "fen": ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR[] w KQkq - 0 1|"
+                    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR[] w KQkq - 0 1"),
+            "movetime": 2000,
+            "multipv": 3,
+            "analysisBoard": 1,
+            "team": "white",
         }
     }
-    
-    print("Testing Hivemind RunPod handler...")
     print(f"Engine path: {ENGINE_PATH}")
     print(f"Networks dir: {NETWORKS_DIR}")
-    print()
-    
-    result = handler(test_job)
-    print()
-    print("Result:")
-    print(json.dumps(result, indent=2))
-else:
-    # RunPod serverless mode
-    runpod.serverless.start({"handler": handler})
+    print(json.dumps(handler(test_job), indent=2))
+
+
+# The Dockerfile runs this file directly (`python -u handler.py`), so __main__
+# has to be the serving path. It previously held the self-test while
+# runpod.serverless.start() sat in the else branch, reachable only on import --
+# so the container ran one test search, printed it, and exited without ever
+# serving. Pass --selftest to get the old behaviour deliberately.
+if __name__ == "__main__":
+    import sys
+
+    if "--selftest" in sys.argv:
+        _selftest()
+    elif runpod is None:
+        raise SystemExit(
+            "the runpod SDK is not installed; use --selftest, or run "
+            "deploy/runpod/dev_server.py for a local HTTP endpoint"
+        )
+    else:
+        runpod.serverless.start({"handler": handler})

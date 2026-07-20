@@ -175,16 +175,19 @@ class HivemindEngine:
         """
         if movetime:
             self._send(f"go movetime {movetime}")
+            search_time = movetime
         elif nodes:
-            # Hivemind currently uses movetime, estimate time from nodes
-            # Rough estimate: 1000 nodes/second
-            estimated_time = max(100, nodes)  # At least 100ms
-            self._send(f"go movetime {estimated_time}")
+            # `go nodes` is honoured directly now. This used to convert nodes
+            # into an estimated movetime, which was never more than a guess --
+            # throughput varies with position and GPU.
+            self._send(f"go nodes {nodes}")
+            # A node budget has no inherent duration, so the timeout is only a
+            # backstop against a wedged engine, not an expected search length.
+            search_time = MAX_MOVE_TIME_MS
         else:
             self._send(f"go movetime {DEFAULT_MOVE_TIME_MS}")
-            
-        # Calculate timeout based on search time
-        search_time = movetime if movetime else (nodes if nodes else DEFAULT_MOVE_TIME_MS)
+            search_time = DEFAULT_MOVE_TIME_MS
+
         timeout = (search_time / 1000) + 30  # Add 30 second buffer
         
         # Collect output until bestmove

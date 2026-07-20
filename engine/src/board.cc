@@ -20,36 +20,37 @@ std::string trim(const std::string &s) {
     return rtrim(ltrim(s));
 }
 
+// Sets one board from a single FEN, unconditionally.
+//
+// This used to skip the reset when `line == pos[n]->fen()`, which is unsound:
+// fen() does not emit the `~` promoted-piece marker, though set() does parse it
+// and it feeds NN planes 22-23/54-55 via promotedPieces. So a position with a
+// promoted queen and one with a real queen on the same square share a fen()
+// string. Replacing the former with the latter compared equal, the reset was
+// skipped, and the stale promoted flag silently corrupted the network input.
+//
+// Re-parsing is cheap next to a search, and history is rebuilt correctly
+// because push_move() records each position as it is replayed.
+void Board::set_board(int board_num, const std::string& line) {
+    states[board_num] = Stockfish::StateListPtr(new std::deque<Stockfish::StateInfo>(1));
+    states[board_num]->emplace_back();
+    pos[board_num]->set(Stockfish::variants.find("bughouse")->second, line, false,
+                        &states[board_num]->back(), Stockfish::Threads.main());
+    clear_position_history(board_num);
+    record_position(board_num);
+}
+
 // Sets the board state using a FEN string.
 // The FEN is expected to have two parts separated by a '|' character.
 void Board::set(std::string fen) {
     std::stringstream ss(fen);
-    std::string line; 
-    getline(ss, line, '|');
-    line = trim(line); 
+    std::string line;
 
-    // Update first board if its FEN differs.
-    if (line != pos[0]->fen()) {
-        states[0] = Stockfish::StateListPtr(new std::deque<Stockfish::StateInfo>(1));
-        states[0]->emplace_back();
-        pos[0]->set(Stockfish::variants.find("bughouse")->second, line, false, &states[0]->back(), Stockfish::Threads.main());
-        // Reset position history for this board
-        clear_position_history(0);
-        record_position(0);
-    }
-    
     getline(ss, line, '|');
-    line = trim(line);
-    
-    // Update second board if its FEN differs.
-    if (line != pos[1]->fen()) {
-        states[1] = Stockfish::StateListPtr(new std::deque<Stockfish::StateInfo>(1));
-        states[1]->emplace_back();
-        pos[1]->set(Stockfish::variants.find("bughouse")->second, line, false, &states[1]->back(), Stockfish::Threads.main());
-        // Reset position history for this board
-        clear_position_history(1);
-        record_position(1);
-    }
+    set_board(0, trim(line));
+
+    getline(ss, line, '|');
+    set_board(1, trim(line));
 }
 
 // Default constructor: initializes the board positions and sets them to the starting FEN.

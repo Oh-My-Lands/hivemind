@@ -111,7 +111,14 @@ class Board {
             std::swap(positionHistory[0], positionHistory[1]);
         }
 
-        void set(std::string fen); 
+        void set(std::string fen);
+
+        /**
+         * @brief Sets a single board from one half of a dual FEN.
+         * @param board_num The board index.
+         * @param line FEN for that board, already trimmed and without the '|'.
+         */
+        void set_board(int board_num, const std::string& line); 
         void push_move(int board_num, Stockfish::Move move);
         void make_moves(Stockfish::Move moveA, Stockfish::Move moveB);
         void unmake_moves(Stockfish::Move moveA, Stockfish::Move moveB);

@@ -6,9 +6,24 @@ set(CMAKE_CXX_STANDARD 23)
 
 # Performance flags:
 #   -Ofast: Maximum optimization (includes -O3 + fast-math)
-#   -march=native: CPU-specific optimizations (AVX2, FMA, etc.)
 #   -flto: Link-time optimization for cross-file inlining
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Ofast -DNDEBUG -DNNUE_EMBEDDING_OFF -march=native -flto")
+#
+# HIVEMIND_ARCH controls -march. It defaults to native, which is right when the
+# machine that builds is the machine that runs -- a dev box, or a pod where you
+# compile in place.
+#
+# It is wrong for a container image, because the build host and the run host are
+# different machines. -march=native on a Tiger Lake laptop emits AVX-512; a
+# RunPod serverless worker on EPYC Zen 3 has no AVX-512, so the binary takes
+# SIGILL on the first such instruction. That happens before main() prints
+# anything, so the only visible symptom is a worker that produces no output and
+# exits rc=-4 -- which looks like a hang, not a crash.
+#
+# Container builds must pass an explicit baseline. x86-64-v3 (AVX2, FMA, BMI2,
+# F16C, LZCNT) is supported by everything since Haswell 2013 / Zen 1 2017, so it
+# covers any GPU host worth renting while keeping the vectorisation that matters.
+set(HIVEMIND_ARCH "native" CACHE STRING "Target CPU architecture for -march")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Ofast -DNDEBUG -DNNUE_EMBEDDING_OFF -march=${HIVEMIND_ARCH} -flto")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto")
 
 # Add source files

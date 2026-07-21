@@ -1,0 +1,175 @@
+# Hivemind Bughouse Engine - slim RunPod serverless image.
+#
+# Same engine as ./Dockerfile, built the same way, but it *runs* on the CUDA
+# runtime base instead of the TensorRT development base.
+#
+# Why: the fat image is 12.9 GB (7.47 GB compressed) and essentially all of it
+# is the build base. Measured contents of nvcr.io/nvidia/tensorrt:25.01-py3:
+#
+#   libnvinfer_builder_resource_win.so   1880 MB   the *Windows* builder. Never
+#                                                  loadable on Linux.
+#   libnvinfer_builder_resource.so       1875 MB   needed only to *build* plans
+#   libnvinfer.so.10                      637 MB   needed
+#   libnvinfer_plugin.so.10                52 MB   only for plugin layers
+#   libnvonnxparser.so.10                 4.2 MB   needed (linked)
+#   /usr/local (CUDA toolkit)             4.4 GB   compiler, not runtime
+#
+# `ldd` on the engine binary links exactly two NVIDIA libraries -- libnvinfer
+# and libnvonnxparser -- and neither links any CUDA library in turn; TensorRT
+# dlopens those. So the runtime needs the CUDA *runtime* libraries and those two
+# TensorRT libraries, and nothing else from the 12.4 GB base.
+#
+# Note that deleting the unwanted files with `RUN rm` does not work: they live
+# in the base image's layers, and a delete in a later layer only writes a
+# whiteout. The original layer still ships and is still pulled. Copying forward
+# into a fresh base is the only way to actually not ship them.
+#
+# Estimated ~0.55 GB compressed against 7.47 GB, most of what remains being
+# libnvinfer and the 94 MB of networks/.
+
+# ---------------------------------------------------------------------------
+# Stage 1: build against the full TensorRT development image.
+# ---------------------------------------------------------------------------
+FROM nvcr.io/nvidia/tensorrt:25.01-py3 AS build
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    ninja-build \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/ /app/src/
+COPY cmake/ /app/cmake/
+COPY tests/ /app/tests/
+COPY CMakeLists.txt /app/
+
+# -DHIVEMIND_ARCH is not optional here. CMakeLists defaults it to native, which
+# targets whatever CPU ran the build -- fine on a pod, fatal in an image, since
+# the worker that runs this is a different machine. See the comment on
+# HIVEMIND_ARCH in CMakeLists.txt.
+RUN mkdir -p build && cd build && \
+    cmake .. -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DHIVEMIND_ARCH=x86-64-v3 \
+        -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" && \
+    ninja
+
+# ---------------------------------------------------------------------------
+# Stage 2: run on the CUDA runtime base.
+# ---------------------------------------------------------------------------
+#
+# cuDNN CAVEAT: this base does not ship cuDNN, and the build base does. TensorRT
+# 10 does not require cuDNN for most networks, but a plan built in a container
+# where cuDNN was present may have selected cuDNN tactics -- in which case
+# loading it here fails. If the engine fails at init on this image and works on
+# the fat one, that is the cause; rebuild the plan with cuDNN tactics disabled
+# rather than adding cuDNN back (it is ~1.5 GB and would undo most of the win).
+# The *base* image, not -runtime. Measured with LD_DEBUG=libs during a 200k-node
+# search on a 4090: the only NVIDIA objects the loader ever initialises are
+# libcuda.so.1, libnvinfer.so.10 and libnvonnxparser.so.10. No cudart, cuBLAS,
+# cuFFT, cuRAND, cuSOLVER, cuSPARSE, nvrtc or cuDNN is touched -- TensorRT 10
+# statically links the CUDA runtime and drives the GPU through the driver API.
+# (onnx_utils.cc:44 calls cudaGetDeviceProperties and still no cudart is loaded,
+# which is what confirms the static link.) /usr/local/cuda/lib64 was on
+# LD_LIBRARY_PATH throughout and nothing was taken from it.
+#
+# That makes -runtime's CUDA libraries 2.07 GB of compressed weight we never
+# execute: -base is 0.10 GB against its 2.17 GB.
+#
+# libcuda.so.1 is *not* in the image at all -- the NVIDIA container runtime
+# injects it from the host driver. The CUDA base images exist mainly to set
+# NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES so that injection happens;
+# that is the only reason to prefer this over plain ubuntu:24.04.
+#
+# Fully qualified: podman enforces short-name resolution and cannot prompt for
+# a registry in a non-interactive build.
+FROM docker.io/nvidia/cuda:12.8.0-base-ubuntu24.04
+
+WORKDIR /app
+
+# Ubuntu 24.04 ships Python 3.12, matching the build base's 3.12.3, so the
+# runpod package resolves to the same interpreter version it was tested on.
+#
+# --break-system-packages: 24.04 marks the system Python as externally managed
+# (PEP 668) and pip refuses to install into it without this. Inside a container
+# there is no system Python to protect.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --no-cache-dir --break-system-packages \
+        runpod \
+        requests
+
+# The two TensorRT libraries the binary links, plus their soname symlinks.
+# Copied by real filename so the symlink chain below is explicit rather than
+# depending on COPY's symlink behaviour.
+COPY --from=build /usr/lib/x86_64-linux-gnu/libnvinfer.so.10.8.0 \
+                  /usr/lib/x86_64-linux-gnu/
+COPY --from=build /usr/lib/x86_64-linux-gnu/libnvonnxparser.so.10.8.0 \
+                  /usr/lib/x86_64-linux-gnu/
+
+# libnvinfer_plugin is deliberately NOT copied. It was included at first as
+# insurance, but the LD_DEBUG trace above shows it is never loaded: this network
+# uses no plugin layers. If a future net does, the symptom is a plan that fails
+# to deserialise, and the fix is to add it back here (52 MB).
+
+RUN cd /usr/lib/x86_64-linux-gnu && \
+    ln -sf libnvinfer.so.10.8.0        libnvinfer.so.10 && \
+    ln -sf libnvinfer.so.10            libnvinfer.so && \
+    ln -sf libnvonnxparser.so.10.8.0   libnvonnxparser.so.10 && \
+    ln -sf libnvonnxparser.so.10       libnvonnxparser.so && \
+    ldconfig
+
+COPY --from=build /app/build/hivemind /app/build/hivemind
+
+# Both files are required, despite only the plan being loaded at runtime.
+# getEnginePath() derives the plan's filename from the ONNX stem
+# (src/onnx_utils.cc:29-30) and findLatestOnnxFile() scans this directory for a
+# .onnx, with neuralnetapi.cpp:65 throwing when there is none. Shipping the plan
+# alone fails at startup with a confusing "doesn't contain a file ending with
+# .onnx" rather than anything about the plan.
+COPY networks/ /app/networks/
+
+COPY deploy/runpod/handler.py /app/handler.py
+COPY deploy/runpod/uci_parse.py /app/uci_parse.py
+
+ENV PYTHONUNBUFFERED=1
+ENV ENGINE_PATH=/app/build/hivemind
+ENV NETWORKS_DIR=/app/networks
+
+# Use the host driver the NVIDIA container runtime injects. Do NOT put
+# /usr/local/cuda/compat ahead of it.
+#
+# Prepending compat was tried and is what broke the first serverless endpoint.
+# The engine statically links the CUDA 12.8 runtime and so refuses to run against
+# a driver older than 12.8, and the base image ships
+# /usr/local/cuda/compat/libcuda.so.* to paper over exactly that -- so putting it
+# first looks like free portability across whatever driver a worker lands on.
+#
+# It is not free. CUDA forward compatibility is only supported on data-center
+# GPUs; on anything else the bundled libcuda and the host kernel driver are an
+# invalid pair, and every CUDA call fails immediately with error 803,
+# cudaErrorSystemDriverMismatch: "system has unsupported display driver / cuda
+# driver combination". Measured on an RTX 2000 Ada worker: the engine died on
+# cudaGetDeviceCount in ~250 ms, before TensorRT was ever reached, and RunPod's
+# own GPU test binary failed with the same 803.
+#
+# That failure is near-invisible from outside. RunPod demotes its failed GPU
+# check to a warning, falls back to merely counting GPUs, and reports "All
+# fitness checks passed", so the worker advertises itself ready with an
+# unusable GPU; the only symptom at the API is a bare BrokenPipeError.
+#
+# The tradeoff this restores: on a host whose driver predates 12.8 the engine
+# now fails with "CUDA driver version is insufficient". That is the better
+# failure -- it names its own cause, and it happens only on old hosts, whereas
+# the compat ordering broke every non-data-center GPU. If an old-driver host
+# ever needs supporting, pin the endpoint's GPU types rather than reordering
+# this; the compat libs are still in the image and can be re-enabled knowingly.
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+
+CMD ["python3", "-u", "handler.py"]

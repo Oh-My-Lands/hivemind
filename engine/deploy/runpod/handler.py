@@ -19,6 +19,8 @@ import re
 import time
 import threading
 import queue
+import signal
+from collections import deque
 from typing import Dict, Any, Optional, List
 
 from uci_parse import (
@@ -50,6 +52,12 @@ class HivemindEngine:
         self.process: Optional[subprocess.Popen] = None
         self.initialized = False
         self.output_queue: queue.Queue = queue.Queue()
+        # Everything the engine said, kept alongside the queue because the queue
+        # is drained by whoever is waiting. On a startup failure the queue is
+        # usually empty by the time anyone asks what went wrong, and the one
+        # line that explains it -- ld.so's "error while loading shared
+        # libraries", or the engine's own fatal -- is already gone.
+        self.recent_output: deque = deque(maxlen=40)
         self.reader_thread: Optional[threading.Thread] = None
         self.running = False
         # Tracked so a Mode change can force a fresh tree; see handler().
@@ -63,6 +71,7 @@ class HivemindEngine:
                 if line:
                     line = line.strip()
                     print(f"<<< {line}", flush=True)
+                    self.recent_output.append(line)
                     self.output_queue.put(line)
                 elif self.process.poll() is not None:
                     # Process exited
@@ -98,12 +107,19 @@ class HivemindEngine:
         time.sleep(0.1)
         
         # Initialize UCI
+        # 60s was too short. The engine answers uci only after the network is
+        # up, and while a cached plan loads in 0.6s, a cache miss rebuilds from
+        # ONNX -- measured at 236s. At 60s that rebuild could not even finish
+        # before the worker was killed and restarted, so the failure looked like
+        # a silent hang rather than a slow build. Allow it to complete and say
+        # so; a plan that has to be rebuilt on every cold start is a problem to
+        # fix, not to hide behind a timeout.
         self._send("uci")
-        response = self._wait_for("uciok", timeout=60)
+        response = self._wait_for("uciok", timeout=300)
         print(f"UCI response: {response[:3]}...")
-        
+
         self._send("isready")
-        self._wait_for("readyok", timeout=60)
+        self._wait_for("readyok", timeout=300)
         
         self.initialized = True
         print("Engine initialized successfully")
@@ -144,7 +160,48 @@ class HivemindEngine:
                 lines.append(line)
                 if expected in line:
                     return lines
-        raise TimeoutError(f"Timeout waiting for '{expected}'")
+                continue
+
+            # No line this second. If the process is gone it is never going to
+            # produce one, so stop waiting -- a dead engine used to burn the
+            # whole timeout before reporting, which turned an instant crash into
+            # a five-minute "hang" and made it look like a slow startup.
+            #
+            # Only checked when the queue is empty: the reader thread can still
+            # have buffered output from a process that has already exited, and
+            # that output is the diagnostic we care about most.
+            if self.process and self.process.poll() is not None:
+                break
+
+        # Report what the engine actually said, and whether it is still alive.
+        #
+        # This used to raise a bare "Timeout waiting for 'uciok'", discarding
+        # every line collected above. On a worker that is the only diagnostic
+        # available, and without it a failed start is indistinguishable between
+        # a crash, a missing library, and a slow TensorRT plan build -- all of
+        # which look like sixty seconds of silence followed by exit 1.
+        rc = self.process.poll() if self.process else None
+        waited = time.time() - start
+        tail = lines[-15:] if lines else ["<no output at all>"]
+
+        if rc is None:
+            what = f"Timeout waiting for '{expected}' after {waited:.0f}s (engine still running)"
+        else:
+            # A negative rc is -N for termination by signal N. Naming the signal
+            # matters: SIGILL in particular means the binary used an instruction
+            # this CPU lacks, which is a build-target bug (-march too new for the
+            # host), not anything to do with the engine's own logic.
+            if rc < 0:
+                try:
+                    name = signal.Signals(-rc).name
+                except ValueError:
+                    name = f"signal {-rc}"
+                cause = f"killed by {name} (rc={rc})"
+            else:
+                cause = f"exited rc={rc}"
+            what = f"Engine {cause} after {waited:.0f}s without printing '{expected}'"
+
+        raise TimeoutError(what + ". Last engine output:\n  " + "\n  ".join(tail))
         
     def verify_ready(self, timeout: float = 1800):
         """
@@ -309,6 +366,72 @@ class HivemindEngine:
 # Global engine instance (reused across warm requests)
 engine = HivemindEngine()
 
+# Engine startup runs in the background so the worker can register with RunPod
+# immediately. _engine_ready fires on success; _engine_error holds the reason on
+# failure. Exactly one of the two is set before the event is signalled.
+_engine_ready = threading.Event()
+_engine_error: Optional[str] = None
+
+
+def _startup_diagnostic() -> str:
+    """Why the engine died, for callers who cannot read the worker log.
+
+    A bare "BrokenPipeError" says only that the process was gone by the time we
+    wrote to it, which is true of every startup failure and distinguishes none
+    of them. The exit status and the engine's last words do distinguish them:
+    127 with "error while loading shared libraries" is a missing .so in the
+    image, whereas a TensorRT plan that fails to deserialise says so and takes
+    minutes rather than milliseconds.
+    """
+    parts: List[str] = []
+
+    proc = engine.process
+    if proc is None:
+        parts.append("engine process was never spawned")
+    else:
+        # The reader thread may still be draining the pipe of a process that
+        # exited microseconds ago; without this the fatal line is often missed.
+        if engine.reader_thread is not None:
+            engine.reader_thread.join(timeout=2.0)
+        code = proc.poll()
+        if code is None:
+            parts.append("engine process still running")
+        elif code < 0:
+            parts.append(f"engine killed by signal {-code}")
+        else:
+            parts.append(f"engine exited {code}")
+
+    if engine.recent_output:
+        parts.append("last output: " + " | ".join(engine.recent_output))
+    else:
+        parts.append("engine produced no output before exiting")
+
+    return " (" + "; ".join(parts) + ")"
+
+
+def _init_engine_background():
+    """Load and verify the engine, then release anything waiting on it."""
+    global _engine_error
+    try:
+        engine.start()
+        engine.verify_ready()
+        print("Engine initialized successfully; accepting work", flush=True)
+    except Exception as exc:
+        _engine_error = f"{type(exc).__name__}: {exc}{_startup_diagnostic()}"
+        print(f"FATAL: engine failed to become ready: {_engine_error}", flush=True)
+    finally:
+        # Signalled on both paths: waiters must wake up to see the error, not
+        # block until their own timeout on a failure that already happened.
+        _engine_ready.set()
+
+
+def _await_engine(timeout: float = 600) -> Optional[str]:
+    """Block until the engine is usable. Returns an error string, or None."""
+    if not _engine_ready.wait(timeout=timeout):
+        return (f"engine still initializing after {timeout:.0f}s; a TensorRT "
+                "plan rebuild can take ~4 minutes on a cold worker")
+    return _engine_error
+
 
 def handler(job: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -343,11 +466,15 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
     try:
         job_input = job.get("input", {})
         action = job_input.get("action", "move")
-        
-        # Ensure engine is running
-        if not engine.initialized:
-            engine.start()
-            
+
+        # Wait for background startup rather than starting the engine here. The
+        # old `if not engine.initialized: engine.start()` raced: two concurrent
+        # jobs on one worker could both see False and each spawn a process.
+        init_error = _await_engine()
+        if init_error is not None:
+            return {"error": "engine unavailable: " + init_error}
+
+
         # Handle different actions
         if action == "newgame":
             engine.new_game()
@@ -513,18 +640,28 @@ if __name__ == "__main__":
             "deploy/runpod/dev_server.py for a local HTTP endpoint"
         )
     else:
-        # Load and verify the engine before accepting jobs. Two reasons:
+        # Register with RunPod FIRST, then load the engine in the background.
         #
-        #  - A worker that cannot search should fail loudly at startup rather
-        #    than accept traffic and error on every request.
-        #  - Loading lazily would make the first request pay the model load,
-        #    and if the TensorRT plan needs rebuilding that is minutes -- long
-        #    enough to blow the job timeout and look like a broken endpoint.
-        try:
-            engine.start()
-            engine.verify_ready()
-        except Exception as exc:
-            print(f"FATAL: engine failed to become ready: {exc}", flush=True)
-            raise SystemExit(1)
-
+        # This used to run engine.start() + verify_ready() before
+        # runpod.serverless.start(), so that a worker which cannot search would
+        # fail at startup rather than accept traffic it cannot serve. That is
+        # the right instinct and the wrong place for it here: RunPod expects a
+        # worker to connect to the job queue shortly after boot, and a cold
+        # TensorRT plan rebuild takes ~4 minutes (measured). The worker spent
+        # that time not registered, the platform reaped it as failed, and it
+        # restarted into the same rebuild forever.
+        #
+        # The failure mode was near-undiagnosable from outside: jobs sat at
+        # IN_QUEUE with retried=0 and failed=0 because nothing was ever
+        # dispatched, /status stayed empty because nothing ever ran, and the
+        # worker died early enough that its logs were often dropped. The only
+        # visible symptom was "worker exited with exit code 1" on a loop.
+        #
+        # Registering first keeps the worker alive while it initializes.
+        # handler() blocks on _await_engine(), so the guarantee that mattered --
+        # never serving a request the engine cannot answer -- is preserved; it
+        # is enforced per-request instead of per-process. A cold first request
+        # pays the rebuild, which is the cost the old ordering was trying to
+        # avoid, and is much the lesser problem.
+        threading.Thread(target=_init_engine_background, daemon=True).start()
         runpod.serverless.start({"handler": handler})

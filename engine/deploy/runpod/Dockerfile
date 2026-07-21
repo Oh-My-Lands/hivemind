@@ -26,10 +26,15 @@ COPY cmake/ /app/cmake/
 COPY tests/ /app/tests/
 COPY CMakeLists.txt /app/
 
-# Build the engine
+# Build the engine.
+#
+# -DHIVEMIND_ARCH: CMakeLists defaults -march to native, which targets the build
+# host's CPU and SIGILLs on any worker with a narrower instruction set. See the
+# comment on HIVEMIND_ARCH in CMakeLists.txt.
 RUN mkdir -p build && cd build && \
     cmake .. -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        -DHIVEMIND_ARCH=x86-64-v3 \
         -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" && \
     ninja
 

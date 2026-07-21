@@ -54,7 +54,11 @@ FULL_IMAGE="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${TAG}"
 # fresh clone builds an image that works in every local test and then times out
 # on its first cold worker, because the plan it needs is not in it. Fail here
 # instead, where the cause is obvious.
-[ -d networks ] || { echo "error: networks/ missing (gitignored; fetch it)" >&2; exit 1; }
+[ -d networks ] || {
+    echo "error: networks/ missing. It is gitignored; run:" >&2
+    echo "         ./deploy/fetch_networks.sh" >&2
+    exit 1
+}
 
 shopt -s nullglob
 onnx=(networks/*.onnx)
@@ -65,7 +69,8 @@ shopt -u nullglob
 [ ${#plans[@]} -gt 0 ] || {
     echo "error: no prebuilt .engine plan in networks/." >&2
     echo "       Building one from ONNX takes ~236s and blows the job timeout" >&2
-    echo "       on a cold worker. Bake the plan before shipping." >&2
+    echo "       on a cold worker, on every cold start. Bake the plan first:" >&2
+    echo "         ./deploy/fetch_networks.sh" >&2
     exit 1
 }
 

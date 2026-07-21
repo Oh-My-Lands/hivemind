@@ -161,19 +161,19 @@ Candidate runtime bases, compressed: `nvidia/cuda:12.8.0-runtime-ubuntu24.04`
    them. Measured ~9,900 nps / 24.7k nodes per 2.5 s search. Worth comparing
    against a 4090 or L40S before this is settled — cost per search matters more
    than cost per second.
-4. **`networks/` is gitignored** (`engine/.gitignore:80`), correctly — it holds a
-   61 MB ONNX and a 32 MB plan. But that means the image build depends on an
-   untracked local file: a fresh clone produces a plan-less image that works in
-   testing and times out on its first cold worker. Wants a fetch script, or a
-   build-time check that fails loudly when no plan matching the target arch is
-   present.
+4. ~~**`networks/` is gitignored**~~ **Closed.** It still is, correctly — 94 MB
+   of binaries git would store badly — but the artifacts are now published as
+   release `networks-v3.0` and `deploy/fetch_networks.sh` pulls them by pinned
+   sha256. A fresh clone runs `./deploy/fetch_networks.sh` and has a complete
+   `networks/` in ~10s; a second run is a no-op. `build_and_push.sh` refuses to
+   build without a plan and points at the script, so the old failure — an image
+   that passes local testing and times out on its first cold worker — cannot be
+   produced silently.
+
+   Checksums are pinned rather than trusted: a truncated download looks exactly
+   like plan corruption at runtime, which is the same ~236s rebuild.
 
 ## Not done
-
-- **Publish the networks release.** `deploy/fetch_networks.sh` is written and
-  tested but fetches from a release that does not exist yet; run it once with
-  `publish` from a machine holding good files. Until then a fresh clone gets a
-  clear error rather than a working download.
 
 - **Concurrency.** `workersMax` is 1, so a second search queues behind the
   first. Raising the cap costs nothing by itself — workers are billed only while

@@ -13,6 +13,7 @@ UCI Protocol Summary for Hivemind:
 """
 
 import os
+import asyncio
 import subprocess
 import json
 import re
@@ -262,12 +263,61 @@ class HivemindEngine:
             
         self._send(cmd)
         
-    def go(self, movetime: int = None, nodes: int = None) -> Dict[str, Any]:
+    def _poll_line(self) -> Optional[str]:
+        """Take a line if one is waiting. Never blocks, so callers can await."""
+        try:
+            return self.output_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _drain(self) -> int:
+        """Discard anything left in the queue. Returns how many lines went."""
+        n = 0
+        while self._poll_line() is not None:
+            n += 1
+        return n
+
+    def cancel_search(self, timeout: float = 10.0) -> bool:
+        """Stop the running search and consume the bestmove it emits.
+
+        Consuming it is the part that matters. `stop` does not abort the search
+        so much as cut it short: the engine still prints a bestmove, and if
+        nobody reads it, it stays in the queue. The next search would then read
+        that line before its own output and return the previous position's move
+        -- a wrong answer to a different question, which is a worse failure than
+        the wasted GPU time this whole path exists to avoid.
+
+        Returns False when no bestmove arrived within the timeout, meaning the
+        engine's state is unknown; go() drains before searching so the next
+        caller is protected either way.
+        """
+        self._send("stop")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                line = self.output_queue.get(timeout=0.5)
+            except queue.Empty:
+                if self.process and self.process.poll() is not None:
+                    return False  # engine died; nothing is coming
+                continue
+            if line.startswith("bestmove"):
+                return True
+        print("cancel_search: no bestmove after stop; engine state unknown",
+              flush=True)
+        return False
+
+    async def go(self, movetime: int = None, nodes: int = None) -> Dict[str, Any]:
         """
         Run search and return results.
-        
+
+        Async so that a cancelled job can actually interrupt it. The RunPod SDK
+        stops a job by cancelling its asyncio task (rp_scale.stop_job), which
+        can only take effect at an await -- a synchronous handler blocks the
+        event loop outright, so the stop signal is not even read until the
+        search has finished and the GPU time is already spent.
+
         Hivemind uses "go movetime <ms>" format.
-        
+
         Returns:
             Dict with:
             - bestmove: "(moveA,moveB)" format
@@ -277,6 +327,14 @@ class HivemindEngine:
             - depth: Search depth
             - time_ms: Time taken
         """
+        # Anything still queued belongs to a previous search -- normally nothing,
+        # but a cancelled search whose bestmove never arrived can leave a line
+        # behind, and reading it here would answer this position with that one.
+        stale = self._drain()
+        if stale:
+            print(f"go: discarded {stale} stale line(s) before searching",
+                  flush=True)
+
         if movetime:
             self._send(f"go movetime {movetime}")
             search_time = movetime
@@ -306,27 +364,41 @@ class HivemindEngine:
         }
 
         start = time.time()
-        while time.time() - start < timeout:
-            line = self._read_line(timeout=1)
-            if not line:
-                continue
+        try:
+            while time.time() - start < timeout:
+                line = self._poll_line()
+                if not line:
+                    # The only await in this loop, so it is the point at which a
+                    # cancellation can be delivered. Short enough that a stopped
+                    # job gives the GPU back promptly; long enough not to spin.
+                    await asyncio.sleep(0.02)
+                    continue
 
-            if line.startswith("info"):
-                info_lines.append(line)
-                result["info"].append(line)
+                if line.startswith("info"):
+                    info_lines.append(line)
+                    result["info"].append(line)
 
-                # Parse info line
-                self._parse_info(line, result)
+                    # Parse info line
+                    self._parse_info(line, result)
 
-            elif line.startswith("bestmove"):
-                # Parse bestmove: "bestmove (e2e4,d2d4)"
-                match = re.search(r'bestmove\s+(\([^)]+\)|\S+)', line)
-                if match:
-                    result["bestmove"] = match.group(1)
+                elif line.startswith("bestmove"):
+                    # Parse bestmove: "bestmove (e2e4,d2d4)"
+                    match = re.search(r'bestmove\s+(\([^)]+\)|\S+)', line)
+                    if match:
+                        result["bestmove"] = match.group(1)
 
-                result["raw_info"] = info_lines
-                result["time_ms"] = int((time.time() - start) * 1000)
-                return result
+                    result["raw_info"] = info_lines
+                    result["time_ms"] = int((time.time() - start) * 1000)
+                    return result
+        except asyncio.CancelledError:
+            # The job was cancelled -- the client disconnected, or it timed out.
+            # Stop searching before propagating: the worker is billed for as
+            # long as the engine keeps working, and nobody is waiting for it.
+            elapsed = time.time() - start
+            stopped = self.cancel_search()
+            print(f"search cancelled after {elapsed:.1f}s "
+                  f"(clean stop: {stopped})", flush=True)
+            raise
 
         raise TimeoutError("Timeout waiting for bestmove")
         
@@ -433,10 +505,17 @@ def _await_engine(timeout: float = 600) -> Optional[str]:
     return _engine_error
 
 
-def handler(job: Dict[str, Any]) -> Dict[str, Any]:
+async def handler(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     RunPod serverless handler.
-    
+
+    Async on purpose. The SDK calls handler(job) directly (rp_job.py:257) and
+    only awaits the result if it is awaitable, so a synchronous handler holds
+    the event loop for the whole search and the worker cannot even notice that
+    the job was cancelled until it is over. Being a coroutine is what makes a
+    cancelled search stop early instead of running to completion and billing for
+    work nobody is waiting for.
+
     Input format:
     {
         "input": {
@@ -470,7 +549,11 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         # Wait for background startup rather than starting the engine here. The
         # old `if not engine.initialized: engine.start()` raced: two concurrent
         # jobs on one worker could both see False and each spawn a process.
-        init_error = _await_engine()
+        # Waited for in a thread so the event loop stays free: the SDK's
+        # stop-signal poller runs on it, and blocking here would make a job
+        # uncancellable for as long as a cold engine takes to load.
+        init_error = await asyncio.get_running_loop().run_in_executor(
+            None, _await_engine)
         if init_error is not None:
             return {"error": "engine unavailable: " + init_error}
 
@@ -525,10 +608,10 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
 
         if nodes:
             nodes = max(1, min(int(nodes), MAX_NODES))
-            result = engine.go(nodes=nodes)
+            result = await engine.go(nodes=nodes)
         else:
             movetime = min(int(movetime), MAX_MOVE_TIME_MS) or DEFAULT_MOVE_TIME_MS
-            result = engine.go(movetime=movetime)
+            result = await engine.go(movetime=movetime)
 
         # Parse joint action into individual moves
         bestmove = result.get("bestmove", "(none)")
@@ -565,17 +648,35 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
 
         return response
             
+    except asyncio.CancelledError:
+        # Explicit, though CancelledError is a BaseException and so would not be
+        # caught below anyway: this must not go down the error path, which kills
+        # the engine process. engine.go() has already stopped the search and
+        # consumed its bestmove, and the worker stays healthy for the next job.
+        # Re-raising is what lets the SDK mark the job cancelled.
+        raise
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        
+
         # Try to restart engine on error
         try:
             engine.stop()
         except:
             pass
-            
+
         return {"error": str(e)}
+
+
+def handler_sync(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Blocking handler() for callers with no event loop.
+
+    The dev server, the self-test and the tests all call the handler directly.
+    They gain nothing from cancellation -- there is no RunPod job to cancel --
+    so they get a wrapper rather than an async rewrite each.
+    """
+    return asyncio.run(handler(job))
 
 
 def parse_joint_action(bestmove: str) -> tuple:
@@ -621,7 +722,7 @@ def _selftest() -> None:
     }
     print(f"Engine path: {ENGINE_PATH}")
     print(f"Networks dir: {NETWORKS_DIR}")
-    print(json.dumps(handler(test_job), indent=2))
+    print(json.dumps(handler_sync(test_job), indent=2))
 
 
 # The Dockerfile runs this file directly (`python -u handler.py`), so __main__

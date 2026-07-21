@@ -176,7 +176,7 @@ def _run_handler(payload: dict) -> dict:
     script = (
         "import json,sys; sys.path.insert(0, %r);"
         "import handler;"
-        "print('@@@'+json.dumps(handler.handler({'input': %s})))"
+        "print('@@@'+json.dumps(handler.handler_sync({'input': %s})))"
         % (HERE, json.dumps(payload))
     )
     proc = subprocess.run(

@@ -32,6 +32,22 @@ requests. Earlier numbers were measured on an RTX 4090 dev pod; anything dated
 - **The slim image serves.** Endpoint `94cvfk6ted0njo` returns real analysis on
   `ghcr.io/oh-my-lands/hivemind-engine:v1` (2026-07-21).
 
+- **A cancelled search now stops.** `handler` is `async def`, and `go()` awaits
+  between polls. That is the whole mechanism: the SDK stops a job by cancelling
+  its asyncio task (`rp_scale.stop_job` → `task.cancel()`), which can only land
+  at an `await`. The old synchronous handler held the event loop for the entire
+  search, so the worker could not even read the stop signal until the search was
+  over and the GPU time already spent — which is why a `bestmove` was once seen
+  arriving 25s after a disconnect.
+
+  The subtle half is `cancel_search()`. UCI `stop` does not abort a search, it
+  cuts it short: the engine still prints a `bestmove`. Leave that line in the
+  queue and the *next* search reads it first and answers the new position with
+  the old position's move. That is a wrong answer, which is worse than the
+  wasted GPU time this exists to avoid, so cancellation consumes the bestmove,
+  and `go()` drains before searching as a backstop. Both paths are covered by a
+  test with a negative control (without the drain, the stale move does leak).
+
 - **Never put `/usr/local/cuda/compat` ahead of the host driver.** This cost a
   day. `Dockerfile.slim` prepended it so the bundled forward-compatibility
   `libcuda` (570.86.10) would win over the driver the NVIDIA container runtime
@@ -70,6 +86,15 @@ container pull/start plus the 0.6s load — not a rebuild.
 **Search throughput on that GPU:** ~**10,000 nps**, 25k nodes and depth 11–12 in
 a 2.5s search. This is the number to beat when evaluating a bigger sm89 part
 (open decision 3).
+
+**Where the money actually goes.** Billing runs from worker start to worker
+stop, rounded up per second, so a cold isolated search costs roughly 5.5s of
+startup + 2.7s of search + the idle timeout — about **13s billed for 2.7s of
+searching**, only ~20% of it useful. That ratio, not the GPU, is the thing worth
+attacking. `idleTimeout` was raised 5s → **15s** on 2026-07-21: a follow-up
+request inside that window skips a startup that would have been billed anyway,
+so it is roughly cost-neutral at the break-even (~13s between requests) and buys
+warm latency. Past ~15s it stops being neutral and starts funding idle time.
 
 **Image size:** the built image is **12.9 GB**; the base
 (`nvcr.io/nvidia/tensorrt:25.01-py3`) is **12.4 GB** of that — 7.47 GB
@@ -131,10 +156,15 @@ Candidate runtime bases, compressed: `nvidia/cuda:12.8.0-runtime-ubuntu24.04`
 
 ## Not done
 
-- **Server-side search cancellation.** A client disconnect does not stop the
-  search — a `bestmove` was observed arriving 25s after one. Abandoned searches
-  run to completion and are billed. The frontend now caches results per position
-  partly because of this: work already paid for should not be thrown away.
+- **Triggering cancellation from the client.** The worker can now stop a search
+  (see Done), but something has to *ask* it to. An HTTP disconnect from
+  `/runsync` does not cancel a RunPod job on its own — the SDK's stop channel is
+  driven by an explicit `POST /v2/{endpoint}/cancel/{job_id}`. So the Vercel
+  proxy needs to hold the job id and call that on abort. Until it does, the
+  engine-side work is inert: nothing generates the signal it now honours.
+
+  This is why the handler fix alone did not close the issue, and the remaining
+  half is in the proxy rather than here.
 
 ## Security / ops notes
 

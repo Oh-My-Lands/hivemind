@@ -85,7 +85,7 @@ class Handler(BaseHTTPRequestHandler):
             job = {"input": job}
 
         try:
-            result = handler_module.handler(job)
+            result = handler_module.handler_sync(job)
         except Exception as exc:  # handler catches most things itself
             LOG.exception("handler failed")
             self._respond(500, {"error": str(exc)})

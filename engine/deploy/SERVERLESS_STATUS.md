@@ -48,6 +48,20 @@ requests. Earlier numbers were measured on an RTX 4090 dev pod; anything dated
   and `go()` drains before searching as a backstop. Both paths are covered by a
   test with a negative control (without the drain, the stale move does leak).
 
+- **The client asks for the cancellation.** The worker honouring a stop signal
+  is only half of it: an HTTP disconnect is invisible to RunPod, and stopping a
+  job needs an explicit `POST /v2/{endpoint}/cancel/{job_id}`. Holding that id
+  means submitting with `/run` rather than `/runsync`, which does not give an id
+  up until it answers — exactly the information missing when a client leaves
+  mid-search. The proxy (`app/api/engine/run/route.ts` in the frontend repo) now
+  submits with `/run`, polls, and cancels both when the client aborts and when
+  its own deadline expires.
+
+  Measured against the live endpoint: a 25s search cancelled 3s in reached
+  `CANCELLED` **0.3s** later, `executionTime` 2731ms, ~21.7s of GPU time not
+  spent — against a `bestmove` that used to arrive 25s after the client had
+  gone. The following search returned a correct, uncontaminated result.
+
 - **Never put `/usr/local/cuda/compat` ahead of the host driver.** This cost a
   day. `Dockerfile.slim` prepended it so the bundled forward-compatibility
   `libcuda` (570.86.10) would win over the driver the NVIDIA container runtime
@@ -156,15 +170,15 @@ Candidate runtime bases, compressed: `nvidia/cuda:12.8.0-runtime-ubuntu24.04`
 
 ## Not done
 
-- **Triggering cancellation from the client.** The worker can now stop a search
-  (see Done), but something has to *ask* it to. An HTTP disconnect from
-  `/runsync` does not cancel a RunPod job on its own — the SDK's stop channel is
-  driven by an explicit `POST /v2/{endpoint}/cancel/{job_id}`. So the Vercel
-  proxy needs to hold the job id and call that on abort. Until it does, the
-  engine-side work is inert: nothing generates the signal it now honours.
+- **Publish the networks release.** `deploy/fetch_networks.sh` is written and
+  tested but fetches from a release that does not exist yet; run it once with
+  `publish` from a machine holding good files. Until then a fresh clone gets a
+  clear error rather than a working download.
 
-  This is why the handler fix alone did not close the issue, and the remaining
-  half is in the proxy rather than here.
+- **Concurrency.** `workersMax` is 1, so a second search queues behind the
+  first. Raising the cap costs nothing by itself — workers are billed only while
+  running — but each additional worker pays its own cold start, and a client
+  retry loop can then bill in parallel.
 
 ## Security / ops notes
 

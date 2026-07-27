@@ -1,8 +1,10 @@
 # Serverless deployment status
 
-Last updated 2026-07-21. Target: RunPod serverless, scaling to zero between
+Last updated 2026-07-26. Target: RunPod serverless, scaling to zero between
 requests. Earlier numbers were measured on an RTX 4090 dev pod; anything dated
-2026-07-21 comes from the live serverless endpoint on an RTX 2000 Ada.
+2026-07-21 comes from the live serverless endpoint on an RTX 2000 Ada; anything
+dated 2026-07-26 comes from a throwaway RTX 4090 pod driving the UCI binary
+directly, not the endpoint.
 
 ## Done
 
@@ -132,7 +134,17 @@ Tree retention was the obvious suspect and was ruled out: two runs under
 *identical* conditions — explicit `newgame` reset, then one 50k search — gave
 `d2d4` and `e2e4` respectively, while a run with a 200k tree deliberately left
 in place agreed with the fresh one. The variation is run-to-run nondeterminism
-in the search itself, most likely parallel MCTS threads racing on expansion.
+in the search itself, from parallel MCTS threads.
+
+**"Racing on expansion" was the right mechanism and the wrong word, and the
+implication drawn from it — that this is a bug with a fix — does not hold.** See
+"Nondeterminism is structural" below, measured 2026-07-26. Multithreaded MCTS is
+order-dependent by construction: thread interleaving decides which leaves get
+selected, so two runs explore different trees no matter how correct the
+synchronisation is. There *are* genuine data races in this code, and upstream's
+`feat/engine-strength-improvements-20260724-1` fixes several real ones — but
+fixing them buys correctness, not repeatability. Only a single-threaded search
+would be reproducible.
 
 So the `movetime` complaint recorded here — "the same position gave `d2d4` on
 one run and `e2e4` on the next, which is disqualifying" — applies to `nodes`
@@ -150,6 +162,44 @@ Note the two candidates were within 0.005 q of each other (`d2d4` ≈ −0.0168,
 `e2e4` ≈ −0.0217), and `bestmove` follows the **most-visited** move rather than
 the highest-q one. The flip is the search resolving a coin toss between equals.
 Expect it to be visible in the UI whenever the top two moves are this close.
+
+### Nondeterminism is structural
+
+Measured 2026-07-26 on an RTX 4090 pod, 25 runs per cell, driving the UCI binary
+directly rather than through the endpoint. Two builds: `94a456f` (this branch)
+and `0225d76` (that branch merged with upstream's three commits, local branch
+`upstream-eval`). Positions are the ones listed under open decision 3.
+
+| Position | Budget | `94a456f` | `0225d76` |
+|---|---|---|---|
+| opening | 50k | `e2e4` ×15, `d2d4` ×10 | `e2e4` ×25 |
+| midgame | 20k | `d7e7,d2d4` ×25 | 3 distinct, top 64% |
+| tactical | 20k | `d8e8,pass` ×25 | 2 distinct, top 64% |
+
+The 7-run result recorded above reproduced: at 25 runs the opening is a 60/40
+split, not a fluke of small n.
+
+**The load-bearing number is not in that table.** `visits` on the top line was
+near-unique in every cell on *both* builds — 19 to 25 distinct values out of 25.
+Neither build is reproducible; they differ only in whether the variation happens
+to change which move wins the visit count. That is what makes this structural
+rather than a defect: the merge fixes real data races and the run-to-run spread
+does not narrow.
+
+So the merge is not a fix for this, and moves it in both directions depending on
+position. Do not expect any synchronisation work to make `bestmove` repeatable.
+
+Two secondary results from the same run, recorded so they are not re-derived:
+
+- **Throughput went up ~9.8% on the merge** (median across six positions, fixed
+  20k nodes: 16,280 → 17,839 nps; range +0.9% to +22.4%). Controlled for build
+  flags by rebuilding `94a456f` with the merge's LTO settings, worth −0.2%. The
+  merged build also reaches ~18% more `visits` per node budget.
+- **`tbhits` is not comparable across the two builds.** It looks like a clean
+  before/after signal for the transposition work and is not: the counter
+  increments on a colliding insert, and once the canonical node is actually
+  reused the re-inserts stop happening, so hits *fall* (−48% to −84%) while the
+  table does more work. Do not read it as a regression.
 
 And wall-clock
 spread is only **1.36x** across position types, which is what makes `nodes` safe

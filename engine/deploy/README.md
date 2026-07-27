@@ -158,9 +158,13 @@ curl -X POST "https://your-site.vercel.app/api/move" \
 ```
 deploy/
 ├── runpod/
-│   ├── Dockerfile          # Container with engine + TensorRT
+│   ├── Dockerfile.slim     # The deployed image: builds on the TensorRT dev
+│   │                       # base, runs on the CUDA base (~0.55 GB compressed)
 │   ├── handler.py          # RunPod serverless handler
-│   ├── build_and_push.sh   # Build script
+│   ├── uci_parse.py        # UCI output parsing, copied flat beside handler.py
+│   ├── build_and_push.sh   # Build, verify, push; prints the digest to deploy
+│   ├── dev_server.py       # Local HTTP shim for testing the handler
+│   ├── test_handler.py
 │   └── README.md
 └── vercel/
     ├── api/

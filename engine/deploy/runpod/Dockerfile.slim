@@ -1,10 +1,12 @@
 # Hivemind Bughouse Engine - slim RunPod serverless image.
 #
-# Same engine as ./Dockerfile, built the same way, but it *runs* on the CUDA
-# runtime base instead of the TensorRT development base.
+# This is the only image that gets built; build_and_push.sh names it directly.
+# It replaced a single-stage build that both compiled and ran on the TensorRT
+# development base (deleted; `git show e50336f:engine/deploy/runpod/Dockerfile`
+# if you need it as a control experiment -- see the cuDNN caveat below).
 #
-# Why: the fat image is 12.9 GB (7.47 GB compressed) and essentially all of it
-# is the build base. Measured contents of nvcr.io/nvidia/tensorrt:25.01-py3:
+# Why: that fat image was 12.9 GB (7.47 GB compressed) and essentially all of it
+# was the build base. Measured contents of nvcr.io/nvidia/tensorrt:25.01-py3:
 #
 #   libnvinfer_builder_resource_win.so   1880 MB   the *Windows* builder. Never
 #                                                  loadable on Linux.
@@ -65,9 +67,10 @@ RUN mkdir -p build && cd build && \
 # cuDNN CAVEAT: this base does not ship cuDNN, and the build base does. TensorRT
 # 10 does not require cuDNN for most networks, but a plan built in a container
 # where cuDNN was present may have selected cuDNN tactics -- in which case
-# loading it here fails. If the engine fails at init on this image and works on
-# the fat one, that is the cause; rebuild the plan with cuDNN tactics disabled
-# rather than adding cuDNN back (it is ~1.5 GB and would undo most of the win).
+# loading it here fails. To test that, run the engine directly in stage 1 (which
+# has cuDNN) via `podman build --target build`: if it inits there and fails
+# here, cuDNN tactics are the cause. Rebuild the plan with them disabled rather
+# than adding cuDNN back (it is ~1.5 GB and would undo most of the win).
 # The *base* image, not -runtime. Measured with LD_DEBUG=libs during a 200k-node
 # search on a 4090: the only NVIDIA objects the loader ever initialises are
 # libcuda.so.1, libnvinfer.so.10 and libnvonnxparser.so.10. No cudart, cuBLAS,

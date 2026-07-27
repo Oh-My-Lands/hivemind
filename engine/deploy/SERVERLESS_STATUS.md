@@ -83,8 +83,10 @@ requests. Earlier numbers were measured on an RTX 4090 dev pod; anything dated
     merely counts GPUs ("Memory allocation NOT tested"), and logged "All fitness
     checks passed."
 
-  The fat `Dockerfile` never set `LD_LIBRARY_PATH` at all, which is why the dev
-  pod never saw this: the bug arrived with the slim build.
+  The single-stage `Dockerfile` this replaced never set `LD_LIBRARY_PATH` at
+  all, which is why the dev pod never saw this: the bug arrived with the slim
+  build. (That Dockerfile has since been deleted; it is at `e50336f` if the
+  comparison is ever needed again.)
 
 ## Measured
 

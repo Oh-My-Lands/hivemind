@@ -38,6 +38,7 @@ void printUsage(const char* progName) {
     cout << "    --gui            Enable web GUI for live viewing" << endl;
     cout << endl;
     cout << "  param-eval         Test same model with different search parameters" << endl;
+    cout << "                     --time-control <ds> enables the clock model (0 = off)" << endl;
     cout << "    --model <path>   Path to model ONNX file" << endl;
     cout << "    --games <n>      Number of games to play (default: 100)" << endl;
     cout << "    --verbose        Print each game result" << endl;
@@ -235,7 +236,12 @@ int main(int argc, char* argv[]) {
                 modelPath = argv[++i];
             } else if ((arg == "--games" || arg == "-g") && i + 1 < argc) {
                 settings.numGames = stoul(argv[++i]);
-            } 
+            } else if (arg == "--time-control" && i + 1 < argc) {
+                // Deciseconds on all four clocks. Omitted or 0 means no clock
+                // model: sitting is free and nothing can end on time, which is
+                // the baseline arm to measure the clock-aware engine against.
+                settings.initialTimeDcs = stoi(argv[++i]);
+            }
             // Player 1 settings
             else if (arg == "--p1-nodes" && i + 1 < argc) {
                 settings.player1.nodesPerMove = stoul(argv[++i]);

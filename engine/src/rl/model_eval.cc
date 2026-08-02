@@ -180,6 +180,12 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
     pgn.round = to_string(gameNumber);
     
     GameResult result = GameResult::NO_RESULT;
+    // All four clocks start level. Zero means no clock model.
+    if (settings.initialTimeDcs > 0) {
+        board.set_clocks(settings.initialTimeDcs, settings.initialTimeDcs,
+                         settings.initialTimeDcs, settings.initialTimeDcs);
+    }
+
     size_t ply = 0;
     Stockfish::Color currentSide = Stockfish::WHITE;
     
@@ -276,9 +282,25 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
             currentSettings = &player2Settings;
         }
         
-        // Determine if current side has time advantage
-        bool teamHasTimeAdvantage = (currentSide == Stockfish::WHITE) ? whiteHasTimeAdvantage : !whiteHasTimeAdvantage;
-        
+        // Determine if current side has time advantage. With a clock model this
+        // is read from the live clocks, exactly as the search does, so the two
+        // cannot disagree about whether a team may sit.
+        const int currentTeam = (currentSide == Stockfish::WHITE) ? Board::WHITE_TEAM
+                                                                  : Board::BLACK_TEAM;
+        bool teamHasTimeAdvantage =
+            board.has_clocks()
+                ? board.team_may_sit(currentTeam)
+                : ((currentSide == Stockfish::WHITE) ? whiteHasTimeAdvantage
+                                                     : !whiteHasTimeAdvantage);
+
+        // Losing on time, checked before mate: a clock at zero ends the game
+        // whatever the position.
+        if (board.has_clocks() && board.team_flagged(currentTeam)) {
+            result = (currentSide == Stockfish::WHITE) ? GameResult::BLACK_WINS
+                                                       : GameResult::WHITE_WINS;
+            break;
+        }
+
         // Check for checkmate (must check explicitly, not just empty legal moves)
         if (board.is_checkmate(currentSide, teamHasTimeAdvantage)) {
             result = (currentSide == Stockfish::WHITE) ? GameResult::BLACK_WINS : GameResult::WHITE_WINS;
@@ -378,7 +400,9 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
         }
         
         // Apply the joint move
-        board.make_moves(moveA, moveB);
+        // Charge the mover's clock. Without the acting team this is a no-op,
+        // which is what leaves the clock-free arm behaving as it always did.
+        board.make_moves(moveA, moveB, currentTeam);
         ply++;
         
         // Update GUI if enabled

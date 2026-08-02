@@ -140,6 +140,11 @@ struct EvalSettings {
     float temperature = 0.3f;        // Temperature for move selection (0.0 = deterministic, higher = more random)
     size_t temperatureDecayMoves = 15; // Number of opening moves before temperature goes to 0
     size_t maxGameLength = 2048;     // Maximum plies before draw
+
+    // Starting clock for all four players, deciseconds. 0 disables the clock
+    // model, which is the pre-existing behaviour: sitting is free and no game
+    // can end on time. That is the baseline arm to measure against.
+    int initialTimeDcs = 0;
     size_t openingMovesToTrack = 4;  // Number of opening moves to track
     bool verbose = false;            // Print each game result
     std::string outputPgnPath = ""; // Optional: save games to PGN file

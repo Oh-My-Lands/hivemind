@@ -78,9 +78,13 @@ def board2planes(board: BughouseBoard, team_side: chess.Color, flip=False) -> np
     planes[26][:, :] = 1.0
     planes[offset + 26][:, :] = 1.0
 
-    # has time advantage (can sit)
+    # has time advantage (can sit), per board: each member races their *diagonal*
+    # opponent (same colour, other board), so the two boards carry different
+    # margins. time_advantage(s) = A.s - B.s, which is the board A member's; the
+    # board B member plays the opposite colour, so theirs is the negation of
+    # time_advantage(not team_side).
     planes[31][:, :] = 1.0 if board.time_advantage(team_side) > 0 else 0.0
-    planes[offset + 31][:, :] = 1.0 if board.time_advantage(team_side) > 0 else 0.0
+    planes[offset + 31][:, :] = 1.0 if board.time_advantage(not team_side) < 0 else 0.0
 
     if flip:
         a_block = planes[:offset].copy()

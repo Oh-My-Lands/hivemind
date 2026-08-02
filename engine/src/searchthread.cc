@@ -201,7 +201,50 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
                                                                    : Board::BLACK_TEAM)
                 : ((teamToPlay == rootTeam) ? teamHasTimeAdvantage : !teamHasTimeAdvantage);
         bool opponentTeamHasTimeAdvantage = !teamToPlayHasTimeAdvantage;
-        
+
+        // A clock at zero ends the game whatever the position, so this is
+        // checked ahead of mate.
+        //
+        // The opponent is tested first, mirroring previousTeamMated below: a
+        // clock only runs on its owner's turn, so the team that just acted is
+        // the one that can have just run out. The team to play cannot have
+        // flagged earlier without this having fired at a shallower node.
+        //
+        // Order matters for the solver, not for the value -- either way it is a
+        // loss for whoever is out of time -- but marking the wrong side WIN
+        // would propagate a wrong proof up the tree.
+        if (board.has_clocks()) {
+            const int toPlayTeam =
+                teamToPlay == Stockfish::WHITE ? Board::WHITE_TEAM : Board::BLACK_TEAM;
+            const int otherTeam = 1 - toPlayTeam;
+
+            const bool opponentFlagged = board.team_flagged(otherTeam);
+            const bool toPlayFlagged = board.team_flagged(toPlayTeam);
+
+            if (opponentFlagged || toPlayFlagged) {
+                ctx.isTerminal = true;
+                if (opponentFlagged) {
+                    ctx.terminalValue = 1.0f;  // they ran out; we win
+                    if (SearchParams::ENABLE_MCTS_SOLVER) {
+                        ctx.leaf->mark_as_win(1);
+                    }
+                } else {
+                    ctx.terminalValue = -1.0f;  // we ran out
+                    if (SearchParams::ENABLE_MCTS_SOLVER) {
+                        ctx.leaf->mark_as_loss(1);
+                    }
+                }
+
+                batchContexts.push_back(std::move(ctx));
+
+                for (auto it = trajectoryBuffer.rbegin(); it != trajectoryBuffer.rend(); ++it) {
+                    const JointActionCandidate& action = it->action;
+                    board.unmake_moves(action.moveA, action.moveB, it->actingTeam);
+                }
+                continue;
+            }
+        }
+
         // First check if the team that just moved (opponentTeam) got themselves mated
         // This happens when they made a move that doesn't save them from check
         bool previousTeamMated = board.is_checkmate(opponentTeam, opponentTeamHasTimeAdvantage);

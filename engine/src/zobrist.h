@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Fairy-Stockfish/src/types.h"
+#include "time_control.h"
 
 namespace Stockfish {
   namespace Zobrist {
@@ -12,5 +13,10 @@ namespace Stockfish {
     // Time advantage key for MCGS transposition detection
     // Positions with different time advantage states are treated as distinct
     extern Key timeAdvantage;
+
+    // One key per board per signed sit-margin bucket, for the clock-aware hash.
+    // Bucketed, not per-decisecond: see Board::hash_key_with_clocks for why the
+    // resolution has to be coarse or the transposition table stops transposing.
+    extern Key marginBucket[2][TimeControl::MARGIN_BUCKET_COUNT];
   }
 }

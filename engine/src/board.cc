@@ -92,6 +92,11 @@ Board::Board(const Board& board) {
     // Copy position history
     positionHistory[0] = board.positionHistory[0];
     positionHistory[1] = board.positionHistory[1];
+
+    // Each search thread works on its own copy, so without this every thread
+    // would search from zeroed clocks -- i.e. already flagged -- while the root
+    // held the real ones.
+    clocks = board.clocks;
 }
 
 // Executes a move on the board and updates the corresponding state.
@@ -323,9 +328,43 @@ bool Board::can_partner_provide_blocking_piece(int board_in_check, Stockfish::Co
     return false;  // No partner capture can provide a blocking piece
 }
 
-void Board::make_moves(Stockfish::Move moveA, Stockfish::Move moveB) {
+// Charge one ply of clock to the acting team on `board`, or restore it.
+//
+// A real move and a sit cost the same. That is not an approximation for want of
+// a better number: a sit lasts until something happens on the other board, and
+// one partner-board ply is drawn from the same distribution as any other ply.
+// See TimeControl::SIT_COST_DCS.
+//
+// The distinction that does matter is sitting versus not being on turn. Only the
+// team on turn on a board burns clock there, so a MOVE_NONE is charged only when
+// that board's side to move belongs to the acting team.
+void Board::charge_clock(int board, Stockfish::Move move, int actingTeam, int sign) {
+    if (actingTeam == NO_TEAM) {
+        return;
+    }
+    const bool teamIsWhite = (actingTeam == WHITE_TEAM);
+    const bool mine = TimeControl::member_is_white(teamIsWhite, board);
+
+    if (move == Stockfish::MOVE_NONE) {
+        // Sitting only costs if it was this team's turn to move here. On unmake
+        // the position is already restored, so side_to_move reads the same
+        // either way.
+        if ((pos[board]->side_to_move() == Stockfish::WHITE) != mine) {
+            return;
+        }
+        clocks.charge(board, mine, sign * TimeControl::SIT_COST_DCS);
+        return;
+    }
+    clocks.charge(board, mine, sign * TimeControl::MOVE_COST_DCS);
+}
+
+void Board::make_moves(Stockfish::Move moveA, Stockfish::Move moveB, int actingTeam) {
     Stockfish::Piece p;
-    
+
+    // Before do_move, while side_to_move still identifies who is paying.
+    charge_clock(BOARD_A, moveA, actingTeam, +1);
+    charge_clock(BOARD_B, moveB, actingTeam, +1);
+
     if (moveA != Stockfish::MOVE_NONE) {
         states[BOARD_A]->emplace_back();
         pos[BOARD_A]->do_move(moveA, states[BOARD_A]->back());
@@ -349,7 +388,7 @@ void Board::make_moves(Stockfish::Move moveA, Stockfish::Move moveB) {
     }
 }
 
-void Board::unmake_moves(Stockfish::Move moveA, Stockfish::Move moveB) {
+void Board::unmake_moves(Stockfish::Move moveA, Stockfish::Move moveB, int actingTeam) {
     if (moveB != Stockfish::MOVE_NONE) {
         Stockfish::Piece pB = states[BOARD_B]->back().pieceToHand;
         if (pB) {
@@ -371,4 +410,9 @@ void Board::unmake_moves(Stockfish::Move moveA, Stockfish::Move moveB) {
         // Remove position from history
         unrecord_position(BOARD_A);
     }
+
+    // After the positions are restored, so side_to_move again identifies who
+    // paid and the sit test reads the same as it did on the way in.
+    charge_clock(BOARD_A, moveA, actingTeam, -1);
+    charge_clock(BOARD_B, moveB, actingTeam, -1);
 }

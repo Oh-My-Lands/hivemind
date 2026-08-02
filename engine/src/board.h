@@ -1,6 +1,7 @@
 #pragma once
 
 #include "constants.h"
+#include "time_control.h"
 #include "zobrist.h"
 
 #include <sstream>
@@ -31,6 +32,11 @@ class Board {
         /// History of board-only position keys for repetition detection (ignores pocket pieces)
         std::vector<uint64_t> positionHistory[2];
 
+        /// The four clocks, deciseconds. Zero throughout means "no clock model",
+        /// which is how every caller that does not pass an acting team to
+        /// make_moves leaves it -- see the actingTeam parameter there.
+        TimeControl::Clocks clocks;
+
         Board();
         Board(const Board& board);
 
@@ -46,6 +52,34 @@ class Board {
             auto combined = k0 ^ (k1 + 0x9e3779b97f4a7c15UL + (k0 << 6) + (k0 >> 2));
             // XOR in time advantage key if team is up on time
             return teamHasTimeAdvantage ? (combined ^ Stockfish::Zobrist::timeAdvantage) : combined;
+        }
+
+        /**
+        * @brief Hash key including the clock state, for the acting team.
+        *
+        * Two positions identical on both boards but with different clocks are
+        * genuinely different positions -- one can afford to sit and the other
+        * cannot -- so they must not share a transposition entry.
+        *
+        * The margin is bucketed rather than hashed at full resolution. At one
+        * key per decisecond nothing would ever transpose: two nodes a single
+        * tick apart would be distinct entries and the table would degenerate
+        * into a very expensive way of storing each node once.
+        */
+        unsigned long hash_key_with_clocks(int actingTeam) {
+            auto k0 = pos[0]->key() ^ Stockfish::Zobrist::ply[game_ply(0)];
+            auto k1 = pos[1]->key() ^ Stockfish::Zobrist::ply[game_ply(1)];
+            auto combined = k0 ^ (k1 + 0x9e3779b97f4a7c15UL + (k0 << 6) + (k0 >> 2));
+
+            if (actingTeam == NO_TEAM || !has_clocks()) {
+                return combined;
+            }
+            for (int board = 0; board < 2; ++board) {
+                const int bucket = TimeControl::margin_bucket(sit_margin(actingTeam, board));
+                combined ^= Stockfish::Zobrist::marginBucket[board]
+                                                            [TimeControl::margin_bucket_index(bucket)];
+            }
+            return combined;
         }
 
         /**
@@ -120,8 +154,45 @@ class Board {
          */
         void set_board(int board_num, const std::string& line); 
         void push_move(int board_num, Stockfish::Move move);
-        void make_moves(Stockfish::Move moveA, Stockfish::Move moveB);
-        void unmake_moves(Stockfish::Move moveA, Stockfish::Move moveB);
+        /// actingTeam values for make_moves/unmake_moves.
+        static constexpr int NO_TEAM = -1;     ///< Do not touch the clocks at all.
+        static constexpr int WHITE_TEAM = 0;   ///< A-White + B-Black.
+        static constexpr int BLACK_TEAM = 1;   ///< A-Black + B-White.
+
+        /**
+        * @brief Applies one team's joint action.
+        *
+        * @param actingTeam Which team is moving, or NO_TEAM to leave the clocks
+        *        untouched. It cannot be inferred from the moves: MOVE_NONE on a
+        *        board means either "not their turn" or "they sat", and those
+        *        cost different amounts of time. The double-sit case has no real
+        *        move to infer from at all, and that is precisely the action that
+        *        most needs charging.
+        *
+        *        Defaulting to NO_TEAM keeps every caller that has no clock model
+        *        -- bench, perft -- behaving exactly as before.
+        */
+        void make_moves(Stockfish::Move moveA, Stockfish::Move moveB, int actingTeam = NO_TEAM);
+        void unmake_moves(Stockfish::Move moveA, Stockfish::Move moveB, int actingTeam = NO_TEAM);
+
+        /// Signed sit margin for `actingTeam`'s member on `board`, deciseconds.
+        int sit_margin(int actingTeam, int board) const {
+            return TimeControl::sit_margin(clocks, actingTeam == WHITE_TEAM, board);
+        }
+
+        /// True when either of `actingTeam`'s members has run out of time.
+        bool team_flagged(int actingTeam) const {
+            return TimeControl::team_flagged(clocks, actingTeam == WHITE_TEAM);
+        }
+
+        /// Charges (sign +1) or refunds (sign -1) one ply on `board`.
+        void charge_clock(int board, Stockfish::Move move, int actingTeam, int sign);
+
+        /// True when any clock has been set, i.e. a clock model is in play.
+        bool has_clocks() const {
+            return clocks.get(0, true) || clocks.get(0, false)
+                || clocks.get(1, true) || clocks.get(1, false);
+        }
         void pop_move(int board_num);
         std::vector<Stockfish::Move> legal_moves(int board_num);
         std::vector<std::pair<int, Stockfish::Move>> legal_moves(Stockfish::Color side, bool teamHasTimeAdvantage = false);

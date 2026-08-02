@@ -97,6 +97,7 @@ Board::Board(const Board& board) {
     // would search from zeroed clocks -- i.e. already flagged -- while the root
     // held the real ones.
     clocks = board.clocks;
+    clocksEnabled = board.clocksEnabled;
 }
 
 // Executes a move on the board and updates the corresponding state.
@@ -339,7 +340,7 @@ bool Board::can_partner_provide_blocking_piece(int board_in_check, Stockfish::Co
 // team on turn on a board burns clock there, so a MOVE_NONE is charged only when
 // that board's side to move belongs to the acting team.
 void Board::charge_clock(int board, Stockfish::Move move, int actingTeam, int sign) {
-    if (actingTeam == NO_TEAM) {
+    if (actingTeam == NO_TEAM || !clocksEnabled) {
         return;
     }
     const bool teamIsWhite = (actingTeam == WHITE_TEAM);

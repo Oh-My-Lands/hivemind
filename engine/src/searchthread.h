@@ -21,9 +21,15 @@ struct TrajectoryEntry {
     Node* node;
     JointActionCandidate action;
     int selectedChildIdx;  // Index of the child that was selected (-1 for root/leaf)
-    
-    TrajectoryEntry(Node* n, const JointActionCandidate& a, int idx = -1)
-        : node(n), action(a), selectedChildIdx(idx) {}
+    // Team that played `action` to reach `node`, Board::NO_TEAM at the root.
+    // Recorded on the way down so the undo refunds the same clock that was
+    // charged; deriving it on the way back up would mean reading the parent
+    // entry's node, which is easy to get off by one.
+    int actingTeam;
+
+    TrajectoryEntry(Node* n, const JointActionCandidate& a, int idx = -1,
+                    int team = Board::NO_TEAM)
+        : node(n), action(a), selectedChildIdx(idx), actingTeam(team) {}
 };
 
 /**

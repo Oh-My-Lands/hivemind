@@ -168,9 +168,10 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
             // Undo moves for this trajectory so we can do another selection
             for (auto it = trajectoryBuffer.rbegin(); it != trajectoryBuffer.rend(); ++it) {
                 const JointActionCandidate& action = it->action;
-                if (action.moveA != Stockfish::MOVE_NONE || action.moveB != Stockfish::MOVE_NONE) {
-                    board.unmake_moves(action.moveA, action.moveB);
-                }
+                // Unconditional, unlike the make side's guard: a double sit
+                // moves no piece but does spend clock, so skipping it here
+                // would charge on the way down and never refund.
+                board.unmake_moves(action.moveA, action.moveB, it->actingTeam);
             }
             continue;
         }
@@ -203,9 +204,10 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
             // Undo moves
             for (auto it = trajectoryBuffer.rbegin(); it != trajectoryBuffer.rend(); ++it) {
                 const JointActionCandidate& action = it->action;
-                if (action.moveA != Stockfish::MOVE_NONE || action.moveB != Stockfish::MOVE_NONE) {
-                    board.unmake_moves(action.moveA, action.moveB);
-                }
+                // Unconditional, unlike the make side's guard: a double sit
+                // moves no piece but does spend clock, so skipping it here
+                // would charge on the way down and never refund.
+                board.unmake_moves(action.moveA, action.moveB, it->actingTeam);
             }
             continue;
         }
@@ -227,9 +229,10 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
             // Undo moves
             for (auto it = trajectoryBuffer.rbegin(); it != trajectoryBuffer.rend(); ++it) {
                 const JointActionCandidate& action = it->action;
-                if (action.moveA != Stockfish::MOVE_NONE || action.moveB != Stockfish::MOVE_NONE) {
-                    board.unmake_moves(action.moveA, action.moveB);
-                }
+                // Unconditional, unlike the make side's guard: a double sit
+                // moves no piece but does spend clock, so skipping it here
+                // would charge on the way down and never refund.
+                board.unmake_moves(action.moveA, action.moveB, it->actingTeam);
             }
             continue;
         }
@@ -247,12 +250,12 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
         
         batchContexts.push_back(std::move(ctx));
         
-        // Undo moves to restore board for next selection
+        // Undo moves to restore board for next selection. Unconditional, unlike
+        // the make side's guard: a double sit moves no piece but does spend
+        // clock, so skipping it would charge on the way down and never refund.
         for (auto it = trajectoryBuffer.rbegin(); it != trajectoryBuffer.rend(); ++it) {
             const JointActionCandidate& action = it->action;
-            if (action.moveA != Stockfish::MOVE_NONE || action.moveB != Stockfish::MOVE_NONE) {
-                board.unmake_moves(action.moveA, action.moveB);
-            }
+            board.unmake_moves(action.moveA, action.moveB, it->actingTeam);
         }
     }
     
@@ -394,6 +397,14 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
  * @param board The current board state (will be modified during selection)
  * @param teamHasTimeAdvantage Whether the searching team has time advantage
  */
+// The team about to act at a node is the team the node says is to play. Kept
+// as a lambda rather than recomputed inline so the three make_moves sites below
+// cannot drift apart.
+static inline int acting_team_of(Node* node) {
+    return node->get_team_to_play() == Stockfish::WHITE ? Board::WHITE_TEAM
+                                                        : Board::BLACK_TEAM;
+}
+
 Node* SearchThread::select_and_expand(Board& board, bool teamHasTimeAdvantage) {
     Node* currentNode = root;
     shared_ptr<Node> nextNode;
@@ -418,7 +429,8 @@ Node* SearchThread::select_and_expand(Board& board, bool teamHasTimeAdvantage) {
                 childIdx = currentNode->get_expanded_count() - 1;
                 
                 // Make moves with the actual expanded action
-                board.make_moves(expandedAction.moveA, expandedAction.moveB);
+                const int actingTeam = acting_team_of(currentNode);
+                board.make_moves(expandedAction.moveA, expandedAction.moveB, actingTeam);
                 
                 // MCGS: Compute position hash and register in transposition table
                 uint64_t childHash = board.hash_key(teamHasTimeAdvantage);
@@ -435,7 +447,7 @@ Node* SearchThread::select_and_expand(Board& board, bool teamHasTimeAdvantage) {
                 // Update the parent trajectory entry with the selected child index
                 trajectoryBuffer.back().selectedChildIdx = childIdx;
                 
-                trajectoryBuffer.emplace_back(nextNode.get(), expandedAction, -1);
+                trajectoryBuffer.emplace_back(nextNode.get(), expandedAction, -1, actingTeam);
                 
                 // Return the newly expanded leaf
                 return nextNode.get();
@@ -445,8 +457,9 @@ Node* SearchThread::select_and_expand(Board& board, bool teamHasTimeAdvantage) {
                 currentNode->apply_virtual_loss(childIdx);
                 trajectoryBuffer.back().selectedChildIdx = childIdx;
                 
-                board.make_moves(expandedAction.moveA, expandedAction.moveB);
-                trajectoryBuffer.emplace_back(nextNode.get(), expandedAction, -1);
+                const int actingTeam = acting_team_of(currentNode);
+                board.make_moves(expandedAction.moveA, expandedAction.moveB, actingTeam);
+                trajectoryBuffer.emplace_back(nextNode.get(), expandedAction, -1, actingTeam);
                 return nextNode.get();
             }
         }
@@ -466,9 +479,10 @@ Node* SearchThread::select_and_expand(Board& board, bool teamHasTimeAdvantage) {
         trajectoryBuffer.back().selectedChildIdx = childIdx;
 
         JointActionCandidate action = currentNode->get_joint_action(childIdx);
-        board.make_moves(action.moveA, action.moveB);
+        const int actingTeam = acting_team_of(currentNode);
+        board.make_moves(action.moveA, action.moveB, actingTeam);
         
-        trajectoryBuffer.emplace_back(nextNode.get(), action, -1);
+        trajectoryBuffer.emplace_back(nextNode.get(), action, -1, actingTeam);
         currentNode = nextNode.get();
     }
 

@@ -37,6 +37,9 @@ class Board {
         /// make_moves leaves it -- see the actingTeam parameter there.
         TimeControl::Clocks clocks;
 
+        /// Whether the clock model is active; see set_clocks.
+        bool clocksEnabled = false;
+
         Board();
         Board(const Board& board);
 
@@ -188,11 +191,25 @@ class Board {
         /// Charges (sign +1) or refunds (sign -1) one ply on `board`.
         void charge_clock(int board, Stockfish::Move move, int actingTeam, int sign);
 
-        /// True when any clock has been set, i.e. a clock model is in play.
-        bool has_clocks() const {
-            return clocks.get(0, true) || clocks.get(0, false)
-                || clocks.get(1, true) || clocks.get(1, false);
+        /**
+        * @brief Turns the clock model on, with all four clocks in deciseconds.
+        *
+        * Until this is called the clocks are inert: make_moves charges nothing
+        * however it is called, so threading an acting team through the search
+        * changes no behaviour on its own. That matters because charging from an
+        * uninitialised zero would drive every clock negative and make
+        * team_flagged read true at every node.
+        */
+        void set_clocks(int aWhite, int aBlack, int bWhite, int bBlack) {
+            clocks.set(0, true, aWhite);
+            clocks.set(0, false, aBlack);
+            clocks.set(1, true, bWhite);
+            clocks.set(1, false, bBlack);
+            clocksEnabled = true;
         }
+
+        /// True when a clock model is in play.
+        bool has_clocks() const { return clocksEnabled; }
         void pop_move(int board_num);
         std::vector<Stockfish::Move> legal_moves(int board_num);
         std::vector<std::pair<int, Stockfish::Move>> legal_moves(Stockfish::Color side, bool teamHasTimeAdvantage = false);

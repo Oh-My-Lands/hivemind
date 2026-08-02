@@ -3,6 +3,7 @@
 #include "../src/board.h"
 #include "../src/constants.h"
 #include "../src/time_control.h"
+#include <vector>
 #include "Fairy-Stockfish/src/bitboard.h"
 #include "Fairy-Stockfish/src/piece.h"
 #include "Fairy-Stockfish/src/position.h"
@@ -27,14 +28,13 @@ protected:
     }
 
     // Both boards at the start position, all four clocks at 3 minutes.
+    // Via set_clocks, not by poking `clocks` directly: the latter leaves the
+    // model disabled and every charge silently no-ops.
     static Board fresh() {
         Board b;
         b.set_fen(BOARD_A, b.startingFen);
         b.set_fen(BOARD_B, b.startingFen);
-        for (int board = 0; board < 2; ++board) {
-            b.clocks.set(board, true, 1800);
-            b.clocks.set(board, false, 1800);
-        }
+        b.set_clocks(1800, 1800, 1800, 1800);
         return b;
     }
 
@@ -146,6 +146,62 @@ TEST_F(ClockTest, RepeatedSittingEventuallyFlags) {
         << "three sits at " << TimeControl::SIT_COST_DCS << " ds each must exhaust "
         << 3 * TimeControl::SIT_COST_DCS << " ds";
     EXPECT_FALSE(b.team_flagged(Board::BLACK_TEAM));
+}
+
+// Mirrors what select_and_expand does: descend making moves, then unwind the
+// whole trajectory in reverse. The search unwinds *unconditionally* while the
+// descent only makes moves it selected, so a double sit -- which moves no piece
+// but does spend clock -- is the case where the two sides can disagree and leak
+// time out of the tree.
+TEST_F(ClockTest, DescendAndUnwindRestoresClocksIncludingDoubleSits) {
+    Board b = fresh();
+    const TimeControl::Clocks before = b.clocks;
+
+    struct Step { Stockfish::Move a, bm; int team; };
+    std::vector<Step> trajectory;
+
+    // ply 1: white team moves on A
+    trajectory.push_back({first_legal(b, BOARD_A), Stockfish::MOVE_NONE, Board::WHITE_TEAM});
+    b.make_moves(trajectory.back().a, trajectory.back().bm, trajectory.back().team);
+
+    // ply 2: black team double-sits -- no piece moves, clock still burns
+    trajectory.push_back({Stockfish::MOVE_NONE, Stockfish::MOVE_NONE, Board::BLACK_TEAM});
+    b.make_moves(trajectory.back().a, trajectory.back().bm, trajectory.back().team);
+
+    // ply 3: white team double-sits too
+    trajectory.push_back({Stockfish::MOVE_NONE, Stockfish::MOVE_NONE, Board::WHITE_TEAM});
+    b.make_moves(trajectory.back().a, trajectory.back().bm, trajectory.back().team);
+
+    bool anySpent = false;
+    for (int board = 0; board < 2; ++board)
+        for (bool white : {true, false})
+            anySpent |= b.clocks.get(board, white) != before.get(board, white);
+    ASSERT_TRUE(anySpent) << "the descent must actually have spent clock";
+
+    for (auto it = trajectory.rbegin(); it != trajectory.rend(); ++it) {
+        b.unmake_moves(it->a, it->bm, it->team);
+    }
+
+    for (int board = 0; board < 2; ++board) {
+        for (bool white : {true, false}) {
+            EXPECT_EQ(b.clocks.get(board, white), before.get(board, white))
+                << "leaked on board " << board << " white=" << white;
+        }
+    }
+}
+
+TEST_F(ClockTest, DisabledClocksIgnoreAnActingTeamEntirely) {
+    Board b;  // no set_clocks, so the model is off
+    b.set_fen(BOARD_A, b.startingFen);
+    b.set_fen(BOARD_B, b.startingFen);
+    ASSERT_FALSE(b.has_clocks());
+
+    b.make_moves(Stockfish::MOVE_NONE, Stockfish::MOVE_NONE, Board::WHITE_TEAM);
+
+    // Must not drive an uninitialised clock negative, which would read as
+    // flagged at every node the moment the search started passing a team.
+    EXPECT_EQ(b.clocks.get(0, true), 0);
+    EXPECT_EQ(b.clocks.get(1, true), 0);
 }
 
 TEST_F(ClockTest, CopyConstructorCarriesTheClocks) {

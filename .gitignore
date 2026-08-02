@@ -9,6 +9,8 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# Standalone CMake root for the GPU-free logic tests; see engine/tests/logic.
+build-logic/
 develop-eggs/
 dist/
 downloads/

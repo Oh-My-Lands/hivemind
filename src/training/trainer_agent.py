@@ -46,13 +46,9 @@ class TrainerAgentPytorch:
         train_config: TrainConfig,
         train_objects: TrainObjects,
         use_rtpt: bool,
-<<<<<<< HEAD
-        additional_loaders=None
-=======
         additional_loaders=None,
         is_rl: bool = False,
         rl_train_loader: DataLoader = None
->>>>>>> feat/multi-pv
     ):
         """
         Class for training the neural network.
@@ -63,20 +59,14 @@ class TrainerAgentPytorch:
         :param use_rtpt: If True, an RTPT object will be created and modified within this class.
         :param additional_loaders: optional dictionary of {dataset_name: DataLoader} whose dataloaders will also be
          used for evaluation (only used for informative purposes)
-<<<<<<< HEAD
-=======
         :param is_rl: If True, use RL training mode with soft policy targets
         :param rl_train_loader: DataLoader for RL training data (used when is_rl=True)
->>>>>>> feat/multi-pv
         """
         self.additional_loaders = additional_loaders
         self.tc = train_config
         self.to = train_objects
-<<<<<<< HEAD
-=======
         self.is_rl = is_rl
         self.rl_train_loader = rl_train_loader
->>>>>>> feat/multi-pv
         if self.to.metrics is None:
             self.to.metrics = {}
         self._model = model
@@ -102,13 +92,10 @@ class TrainerAgentPytorch:
         self.optimizer = create_optimizer(self._model, self.tc)
 
         self.ordering = glob.glob(main_config['planes_train_dir'] + '*')
-<<<<<<< HEAD
-=======
         
         # For RL mode, we don't use the ordering (file-based loading)
         if self.is_rl and not self.ordering:
             self.ordering = ['rl_data']  # Placeholder to prevent empty ordering check
->>>>>>> feat/multi-pv
 
         # few variables which are internally used
         self.val_loss_best = self.val_p_acc_best = self.k_steps_best = \
@@ -149,13 +136,6 @@ class TrainerAgentPytorch:
             logging.info("=========================")
             self.t_s_steps = time()
 
-<<<<<<< HEAD
-            for shard_file_path in tqdm(self.ordering):
-                train_loader = self._get_train_loader(shard_file_path)
-
-                for _, batch in enumerate(train_loader):
-                    data = self.train_update(batch)
-=======
             # RL mode: iterate over the rl_train_loader directly
             if self.is_rl and self.rl_train_loader is not None:
                 for _, batch in enumerate(self.rl_train_loader):
@@ -177,7 +157,6 @@ class TrainerAgentPytorch:
 
                     for _, batch in enumerate(train_loader):
                         data = self.train_update(batch)
->>>>>>> feat/multi-pv
 
                     # add the graph representation of the network to the tensorboard log file
                     if not self.graph_exported and self.tc.log_metrics_to_tensorboard:
@@ -445,8 +424,6 @@ class TrainerAgentPytorch:
         self.batch_proc_tmp += 1
         return data
 
-<<<<<<< HEAD
-=======
     def train_update_rl(self, batch):
         """
         Training update for RL mode with separate policy_a and policy_b targets.
@@ -632,7 +609,6 @@ class TrainerAgentPytorch:
         return return_metrics_and_stop_training(
             self.k_steps, val_metric_values, self.k_steps_best, self.val_metric_values_best)
 
->>>>>>> feat/multi-pv
     def _log_metrics(self, metric_values, global_step, prefix="train_"):
         """
         Logs a dictionary object of metric value to the console and to tensorboard

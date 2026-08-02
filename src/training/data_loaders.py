@@ -2,19 +2,11 @@
 """
 Data loading utilities for parquet files
 """
-<<<<<<< HEAD
-=======
 import numpy as np
->>>>>>> feat/multi-pv
 import polars as pl
 import torch
 
 
-<<<<<<< HEAD
-def load_parquet_shard(file_path):
-    """
-    Loads a single parquet shard and converts it to PyTorch tensors.
-=======
 # Constants matching C++ code
 NB_INPUT_CHANNELS = 64
 BOARD_SIZE = 8
@@ -64,7 +56,6 @@ def flip_bughouse_sample(x, policy_a, policy_b):
 def load_parquet_shard(file_path):
     """
     Loads a single supervised learning parquet shard and converts it to PyTorch tensors.
->>>>>>> feat/multi-pv
     x: board planes (64, 8, 8)
     y_value: game outcome
     y_policy_idx: tuple containing (move_index, ...)
@@ -82,9 +73,6 @@ def load_parquet_shard(file_path):
     # 3. Process Y_policy
     y_pol_tensor = torch.tensor(df['y_policy_idx'].to_list(), dtype=torch.long)
 
-<<<<<<< HEAD
-    return x_tensor, y_val_tensor, y_pol_tensor
-=======
     return x_tensor, y_val_tensor, y_pol_tensor
 
 
@@ -116,7 +104,7 @@ def load_rl_parquet_shard(file_path):
     # Normalize pocket planes (channels 12-21 and 44-53): stored as 0-16, convert to 0.0-1.0
     x_tensor[:, 12:22, :, :] /= 16.0
     x_tensor[:, 44:54, :, :] /= 16.0
-    
+
     # Process Y_Value
     y_val_tensor = torch.tensor(df['y_value'].to_list(), dtype=torch.float32)
     
@@ -310,4 +298,3 @@ def load_rl_data_from_directory(data_dir, max_samples=None):
         policy_b_tensor = policy_b_tensor[:max_samples]
     
     return x_tensor, y_val_tensor, policy_a_tensor, policy_b_tensor
->>>>>>> feat/multi-pv

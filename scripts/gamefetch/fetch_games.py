@@ -288,6 +288,17 @@ def run_fetch(args: argparse.Namespace) -> int:
                 abandon(game_id, f"partner board below {args.min_rating}")
                 continue
 
+            # Point each board at its counterpart's game_id. The callback's
+            # partnerGameId is a UUID while game_id is the numeric live-game id,
+            # so as returned the two never reconcile -- and both consumers need
+            # them to. jsonl_to_parquet filters partner_game_id.is_in(game_ids)
+            # and process_parquet_file self-joins on it, so leaving the UUID in
+            # place drops every row at conversion time while still exiting 0.
+            # The pairing is unambiguous here: these two payloads were fetched
+            # as a pair.
+            rows[0]["partner_game_id"] = rows[1]["game_id"]
+            rows[1]["partner_game_id"] = rows[0]["game_id"]
+
             for row in rows:
                 out_handle.write(json.dumps(row) + "\n")
                 done.add(row["game_id"])

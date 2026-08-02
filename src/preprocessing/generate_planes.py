@@ -43,6 +43,10 @@ def generate_planes(samples_per_shard=2 ** 16):
     output_dir = os.path.join(data_dir, 'planes', 'train')
     writer = ShardWriter(output_dir, samples_per_shard)
 
+    # 2200, not 2400, on purpose. The corpus is seeded at 2400 so every board
+    # being analysed clears that bar, but this filter applies to all four
+    # players -- raising it here would re-drop every pair whose partner board
+    # sits between the two, which measurement showed is ~85% of them.
     game_gen = process_parquet_file(games_path, min_rating=2200)
     print("Starting plane generation...")
 

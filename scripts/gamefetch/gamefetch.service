@@ -16,7 +16,7 @@ ExecStart=/opt/gamefetch/venv/bin/python /opt/gamefetch/fetch_games.py fetch \
     --candidates /opt/gamefetch/data/candidates.txt \
     --out        /opt/gamefetch/data/games.jsonl \
     --failed     /opt/gamefetch/data/failed.txt \
-    --target-games 10000 \
+    --target-games 100000 \
     --sleep 1.0
 
 # on-failure, not always: reaching the target is a clean exit and must not

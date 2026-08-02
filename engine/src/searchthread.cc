@@ -137,7 +137,11 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
         ctx.trajectory = trajectoryBuffer;
         ctx.leaf = leaf;
         ctx.teamToPlay = leaf->get_team_to_play();
-        ctx.sitPlaneActive = (ctx.teamToPlay == root->get_team_to_play()) == teamHasTimeAdvantage;
+        ctx.sitPlaneActive =
+            board.has_clocks()
+                ? board.team_may_sit(ctx.teamToPlay == Stockfish::WHITE ? Board::WHITE_TEAM
+                                                                        : Board::BLACK_TEAM)
+                : ((ctx.teamToPlay == root->get_team_to_play()) == teamHasTimeAdvantage);
         
         // Check for terminal states
         // Pass the tree depth (trajectory size minus 1) as ply so that 2-fold repetitions
@@ -182,9 +186,20 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
         Stockfish::Color opponentTeam = ~teamToPlay;
         Stockfish::Color rootTeam = root->get_team_to_play();
         
-        // Determine time advantage for each team based on root team's perspective
-        // teamHasTimeAdvantage is whether the ROOT team has time advantage
-        bool teamToPlayHasTimeAdvantage = (teamToPlay == rootTeam) ? teamHasTimeAdvantage : !teamHasTimeAdvantage;
+        // Sit permission for the team about to play.
+        //
+        // With a clock model it is read from this node's actual clocks, so it
+        // can change hands mid-tree as time is spent. That is also closer to
+        // what the network was trained on: board2planes derives the plane from
+        // time_advantage(team_side) per position, so supervised data has the
+        // bit varying within a game. The global constant is the outlier.
+        //
+        // Without clocks, fall back to the old global bit exactly as before.
+        bool teamToPlayHasTimeAdvantage =
+            board.has_clocks()
+                ? board.team_may_sit(teamToPlay == Stockfish::WHITE ? Board::WHITE_TEAM
+                                                                   : Board::BLACK_TEAM)
+                : ((teamToPlay == rootTeam) ? teamHasTimeAdvantage : !teamHasTimeAdvantage);
         bool opponentTeamHasTimeAdvantage = !teamToPlayHasTimeAdvantage;
         
         // First check if the team that just moved (opponentTeam) got themselves mated
@@ -326,7 +341,12 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
             // Compute whether the team at this leaf has time advantage
             // Time advantage alternates: if root team has it, opponent team doesn't
             Stockfish::Color rootTeam = root->get_team_to_play();
-            bool leafTeamHasTimeAdvantage = (ctx.teamToPlay == rootTeam) ? teamHasTimeAdvantage : !teamHasTimeAdvantage;
+            bool leafTeamHasTimeAdvantage =
+                ctx.boardState && ctx.boardState->has_clocks()
+                    ? ctx.boardState->team_may_sit(ctx.teamToPlay == Stockfish::WHITE
+                                                       ? Board::WHITE_TEAM
+                                                       : Board::BLACK_TEAM)
+                    : ((ctx.teamToPlay == rootTeam) ? teamHasTimeAdvantage : !teamHasTimeAdvantage);
             
             // Get legal moves for each board
             vector<Stockfish::Move> actionsA;

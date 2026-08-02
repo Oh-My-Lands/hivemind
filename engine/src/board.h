@@ -183,6 +183,19 @@ class Board {
             return TimeControl::sit_margin(clocks, actingTeam == WHITE_TEAM, board);
         }
 
+        /**
+        * @brief Whether `actingTeam` is up enough on time to sit.
+        *
+        * Only meaningful when has_clocks(); callers fall back to the global
+        * Mode bit otherwise. Uses team uptime -- the diagonal sum -- rather
+        * than one board's margin, matching how the frontend derives the same
+        * decision.
+        */
+        bool team_may_sit(int actingTeam) const {
+            return TimeControl::team_margin(clocks, actingTeam == WHITE_TEAM)
+                   >= TimeControl::SIT_THRESHOLD_DCS;
+        }
+
         /// True when either of `actingTeam`'s members has run out of time.
         bool team_flagged(int actingTeam) const {
             return TimeControl::team_flagged(clocks, actingTeam == WHITE_TEAM);

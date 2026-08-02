@@ -50,6 +50,17 @@ constexpr int MOVE_COST_DCS = 9;
 constexpr int SIT_COST_DCS = 9;
 
 /**
+ * Team uptime, in deciseconds, at which a team is treated as able to sit.
+ *
+ * Matches MODE_SIT_THRESHOLD_DCS in the frontend's engineMode.ts, so the engine
+ * and the UI answer "is this team up on time" the same way. It is a floor
+ * rather than a deadband: below it a team is treated as "go", the conservative
+ * default, because that is the smaller action space and cannot invent a
+ * double-sit the team has not earned.
+ */
+constexpr int SIT_THRESHOLD_DCS = 15;
+
+/**
  * @brief The four clocks of a bughouse game, in deciseconds.
  *
  * Indexed [board][isWhite], board 0 = A and 1 = B.

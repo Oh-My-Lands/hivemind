@@ -248,6 +248,25 @@ void UCI::setoption(std::istringstream& is) {
         } else if (value == "go") {
             teamHasTimeAdvantage = false;
         }
+    } else if (name == "Clocks") {
+        // "Clocks" takes four deciseconds: A-White A-Black B-White B-Black.
+        // `value` above only captured the first token, so re-read the rest.
+        int parsed[4] = {0, 0, 0, 0};
+        parsed[0] = std::atoi(value.c_str());
+        bool ok = true;
+        for (int i = 1; i < 4; ++i) {
+            std::string tok;
+            if (!(is >> tok)) { ok = false; break; }
+            parsed[i] = std::atoi(tok.c_str());
+        }
+        if (!ok) {
+            std::cout << "info string Clocks ignored: expected four integers "
+                         "(A-White A-Black B-White B-Black, deciseconds)" << std::endl;
+            return;
+        }
+        board.set_clocks(parsed[0], parsed[1], parsed[2], parsed[3]);
+        std::cout << "info string Clocks set to " << parsed[0] << " " << parsed[1]
+                  << " " << parsed[2] << " " << parsed[3] << " (ds)" << std::endl;
     }
 }
 
@@ -259,6 +278,9 @@ void UCI::send_uci_response() {
     cout << "option name AnalysisBoard type spin default 1 min 1 max 2" << endl;
     cout << "option name Team type combo default white var white var black" << endl;
     cout << "option name Mode type combo default go var sit var go" << endl;
+    // Four deciseconds: A-White A-Black B-White B-Black. Unset means no clock
+    // model, and the engine falls back to Mode's single global bit.
+    cout << "option name Clocks type string default" << endl;
     cout << "uciok" << endl;
 }
 

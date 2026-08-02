@@ -1,0 +1,51 @@
+[Unit]
+Description=Fetch bughouse per-move clocks from chess.com
+Documentation=https://github.com/Oh-My-Lands/hivemind
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gamefetch
+Group=gamefetch
+WorkingDirectory=/opt/gamefetch
+
+# Exits 0 once --target-games is reached. Raise the target and restart to
+# extend a run; already-fetched games are skipped, not refetched.
+ExecStart=/opt/gamefetch/venv/bin/python /opt/gamefetch/fetch_games.py fetch \
+    --candidates /opt/gamefetch/data/candidates.txt \
+    --out        /opt/gamefetch/data/games.jsonl \
+    --failed     /opt/gamefetch/data/failed.txt \
+    --target-games 10000 \
+    --sleep 1.0
+
+# on-failure, not always: reaching the target is a clean exit and must not
+# restart into a busy loop. Transient network death does restart.
+Restart=on-failure
+RestartSec=120
+
+# This box also serves analysis.josephw.me on 4 GB of RAM. The job is a
+# sleeping HTTP loop, so starve it of everything and it will still finish on
+# schedule.
+Nice=15
+CPUWeight=20
+IOSchedulingClass=idle
+MemoryMax=512M
+TasksMax=32
+
+# It only ever touches its own data directory; the explorer DB is read once,
+# out of band, by the seed step in install.sh.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/gamefetch/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

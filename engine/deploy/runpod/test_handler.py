@@ -121,6 +121,48 @@ class TestParsing:
         assert parse_info_line(line)["time"] == 3409
 
 
+class TestSearchTimeout:
+    """
+    The bestmove backstop, which had no test and was wrong for every node
+    search: it took MAX_MOVE_TIME_MS as the budget, so 20k and 4M alike waited
+    60s and then raised TimeoutError. That put an invisible ceiling at ~430-490k
+    nodes on the serving GPU and turned a reachable budget into an HTTP 502.
+    """
+
+    def test_scales_with_the_node_budget(self):
+        import handler as handler_module
+
+        # The number that mattered: 1M nodes used to get 60s and could not
+        # finish in it. At the 6,000 nps floor it now gets ~197s.
+        assert handler_module.search_timeout_seconds(nodes=1_000_000) == pytest.approx(196.7, abs=0.5)
+        # And the budget that silently never worked.
+        assert handler_module.search_timeout_seconds(nodes=500_000) > 60
+
+    def test_covers_the_measured_worst_case_throughput(self):
+        import handler as handler_module
+
+        # 7,221 nps is the slowest search measured on the serving GPU. Every
+        # budget the caller's proxy permits has to fit inside its own timeout at
+        # that rate, or the backstop is again the thing that fails the search.
+        worst_case_nps = 7_221
+        for nodes in (20_000, 200_000, 500_000, 1_000_000, 4_000_000):
+            assert handler_module.search_timeout_seconds(nodes=nodes) > nodes / worst_case_nps
+
+    def test_a_movetime_search_is_unchanged(self):
+        import handler as handler_module
+
+        # Only the node path was wrong; movetime already knew its own duration.
+        assert handler_module.search_timeout_seconds(movetime=30_000) == 60
+        assert handler_module.search_timeout_seconds() == pytest.approx(31.0)
+
+    def test_movetime_wins_when_both_are_given(self):
+        import handler as handler_module
+
+        # `go` sends movetime in that case, so the timeout has to follow the
+        # command actually issued rather than the larger of the two.
+        assert handler_module.search_timeout_seconds(movetime=1_000, nodes=4_000_000) == 31
+
+
 class TestVerifyReady:
     """
     The engine answers `uciok` before it knows whether any GPU engine loaded,

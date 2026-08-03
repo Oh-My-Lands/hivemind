@@ -45,6 +45,57 @@ MAX_MOVE_TIME_MS = 30000  # 30 second max
 MAX_NODES = 50_000_000
 MAX_MULTIPV = 100
 
+# Throughput floor for turning a node budget into a timeout. See `go` for why
+# this is a floor rather than an estimate, and why it is under the 7,221 nps
+# worst case measured on the serving GPU.
+#
+# Note what this does NOT bound: RunPod kills the job at the endpoint's own
+# `executionTimeoutMs` (600s), so a budget over ~4.3M nodes cannot finish
+# whatever this says. The caller's proxy caps at 4M for that reason.
+MIN_NODES_PER_SECOND = 6000
+
+# Fixed overhead allowed on top of the search itself: the `go` reaching the
+# engine, the first visit on a cold cache, and bestmove being read back out.
+SEARCH_TIMEOUT_BUFFER_S = 30
+
+
+def search_timeout_seconds(movetime: int = None, nodes: int = None) -> float:
+    """
+    How long to wait for bestmove.
+
+    A backstop against a wedged engine, not an expected search length -- but it
+    has to scale with what was actually asked for, which is the bug this
+    function exists to have fixed.
+
+    A node search used to take its budget from MAX_MOVE_TIME_MS, so every node
+    search -- 20k or 4M -- waited exactly 60s and then raised. The old comment
+    was right that this is a backstop rather than a prediction, and then took
+    the wrong number for it: the movetime cap says what the *other* budget kind
+    may ask for and nothing whatever about how long a node search should run.
+    The effect was an invisible ceiling at ~430-490k nodes on the serving GPU.
+    The client offered a 500k option for eight days and it never once returned;
+    every attempt surfaced as an HTTP 502 carrying "Timeout waiting for
+    bestmove", which reads as a broken engine rather than a budget that was
+    never reachable in the first place.
+
+    MIN_NODES_PER_SECOND is a floor, not an estimate. The measured worst case on
+    the serving RTX 4000 Ada is 7,221 nps, on a middlegame holding 18 pieces in
+    hand -- pocket size, not tactics, is what makes a bughouse position slow.
+    This sits under that so a position slower than any yet measured still
+    completes, because the two errors do not cost the same: too generous and a
+    genuinely wedged engine is caught late, having burned GPU seconds nobody is
+    waiting for; too tight and a healthy search is killed *after doing all of
+    the work*, and billed in full for no answer.
+    """
+    if movetime:
+        search_time_ms = movetime
+    elif nodes:
+        search_time_ms = (nodes / MIN_NODES_PER_SECOND) * 1000
+    else:
+        search_time_ms = DEFAULT_MOVE_TIME_MS
+
+    return (search_time_ms / 1000) + SEARCH_TIMEOUT_BUFFER_S
+
 
 class HivemindEngine:
     """Manages a Hivemind UCI engine session for bughouse."""
@@ -337,20 +388,15 @@ class HivemindEngine:
 
         if movetime:
             self._send(f"go movetime {movetime}")
-            search_time = movetime
         elif nodes:
             # `go nodes` is honoured directly now. This used to convert nodes
             # into an estimated movetime, which was never more than a guess --
             # throughput varies with position and GPU.
             self._send(f"go nodes {nodes}")
-            # A node budget has no inherent duration, so the timeout is only a
-            # backstop against a wedged engine, not an expected search length.
-            search_time = MAX_MOVE_TIME_MS
         else:
             self._send(f"go movetime {DEFAULT_MOVE_TIME_MS}")
-            search_time = DEFAULT_MOVE_TIME_MS
 
-        timeout = (search_time / 1000) + 30  # Add 30 second buffer
+        timeout = search_timeout_seconds(movetime=movetime, nodes=nodes)
         
         # Collect output until bestmove
         info_lines = []

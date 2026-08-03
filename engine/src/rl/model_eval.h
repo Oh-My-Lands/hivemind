@@ -65,7 +65,16 @@ struct PlayerConfig {
     // Q-value settings
     float qValueWeight = 1.0f;       // Weight for Q-value in move selection
     float qVetoDelta = 0.4f;         // Q-value veto threshold
-    
+
+    // Whether this player's *search* may see the clocks. False is the Phase 0
+    // baseline: sit permission comes from the fixed team bit and nothing in the
+    // tree can flag. It does not exempt the player from the clock -- the game
+    // still charges its moves and it can still lose on time.
+    //
+    // Only meaningful when EvalSettings::initialTimeDcs > 0. With no clock
+    // model there is nothing to be blind to and both arms are identical.
+    bool clockAware = true;
+
     // Convenience methods
     bool hasCustomModel() const { return !modelPath.empty(); }
 };

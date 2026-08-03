@@ -223,6 +223,23 @@ class Board {
 
         /// True when a clock model is in play.
         bool has_clocks() const { return clocksEnabled; }
+
+        /**
+        * @brief Hides or reveals the clock model without disturbing the clocks.
+        *
+        * has_clocks() gates every clock-aware path in the search -- sit
+        * permission, flag-as-terminal, the hash buckets, the charging in
+        * make_moves -- so flipping this switches a search wholesale between
+        * Phase 4 semantics and the pre-Phase 4 fallback. The clock *values*
+        * survive, which is what separates this from set_clocks: the caller can
+        * blind one player's search and then hand the position back to a game
+        * that still charges time and still ends on a flag.
+        *
+        * That asymmetry is the point. Without it both players on a shared board
+        * are necessarily clock-aware together, and param-eval can only play a
+        * net against itself.
+        */
+        void set_clocks_visible(bool visible) { clocksEnabled = visible; }
         void pop_move(int board_num);
         std::vector<Stockfish::Move> legal_moves(int board_num);
         std::vector<std::pair<int, Stockfish::Move>> legal_moves(Stockfish::Color side, bool teamHasTimeAdvantage = false);

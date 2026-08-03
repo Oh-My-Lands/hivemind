@@ -271,6 +271,11 @@ int main(int argc, char* argv[]) {
                 settings.player1.qValueWeight = stof(argv[++i]);
             } else if (arg == "--p1-qveto" && i + 1 < argc) {
                 settings.player1.qVetoDelta = stof(argv[++i]);
+            } else if (arg == "--p1-clocks" && i + 1 < argc) {
+                // 0 makes this player's search clock-blind. Pair with
+                // --time-control to get the Phase 4 A/B: same net, same world,
+                // one side able to reason about the clock and one not.
+                settings.player1.clockAware = (stoi(argv[++i]) != 0);
             }
             // Player 2 settings
             else if (arg == "--p2-nodes" && i + 1 < argc) {
@@ -301,6 +306,8 @@ int main(int argc, char* argv[]) {
                 settings.player2.qValueWeight = stof(argv[++i]);
             } else if (arg == "--p2-qveto" && i + 1 < argc) {
                 settings.player2.qVetoDelta = stof(argv[++i]);
+            } else if (arg == "--p2-clocks" && i + 1 < argc) {
+                settings.player2.clockAware = (stoi(argv[++i]) != 0);
             }
             // Common settings
             else if (arg == "--verbose" || arg == "-v") {

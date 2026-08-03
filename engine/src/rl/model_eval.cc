@@ -357,8 +357,26 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
         } else {
             opts = SearchOptions::selfplay(nodesForThisMove, *currentSettings);
         }
+        // A clock-blind player searches with the clock model hidden. Sit
+        // permission inside its tree falls back to the fixed team bit and no
+        // line can end on a flag, which is exactly the pre-Phase 4 engine.
+        //
+        // The clocks themselves are untouched, so this move is still charged
+        // below and this player can still lose on time -- it simply cannot plan
+        // around any of that. Note what still leaks: teamHasTimeAdvantage above
+        // is clock-derived even here, because it also feeds legal_moves and the
+        // two players have to agree on the rules of the game they are playing.
+        // So the baseline arm is "cannot reason about the clock", not "knows
+        // nothing about it".
+        const bool searchSeesClocks =
+            !settings.usePlayerConfigs ||
+            (isPlayer1Turn ? settings.player1.clockAware : settings.player2.clockAware);
+        const bool hideClocks = board.has_clocks() && !searchSeesClocks;
+
+        if (hideClocks) board.set_clocks_visible(false);
         JointActionCandidate bestAction = agent->run_search(
             board, *engines, currentSide, teamHasTimeAdvantage, opts);
+        if (hideClocks) board.set_clocks_visible(true);
         
         // Sample action with temperature from visit distribution (like selfplay)
         // This allows for more varied play and realistic draw rates

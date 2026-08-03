@@ -248,3 +248,45 @@ TEST_F(ClockTest, HashSharesEntriesWithinABucket) {
     EXPECT_EQ(a.hash_key_with_clocks(Board::WHITE_TEAM),
               c.hash_key_with_clocks(Board::WHITE_TEAM));
 }
+
+TEST_F(ClockTest, HidingClocksPreservesTheirValues) {
+    Board b = fresh();
+    b.clocks.set(0, true, 1234);
+
+    b.set_clocks_visible(false);
+    EXPECT_FALSE(b.has_clocks());
+
+    b.set_clocks_visible(true);
+    ASSERT_TRUE(b.has_clocks());
+    EXPECT_EQ(b.clocks.get(0, true), 1234)
+        << "blinding a search must not cost the game its clocks";
+    EXPECT_EQ(b.clocks.get(1, false), 1800);
+}
+
+TEST_F(ClockTest, HiddenClocksAreNotChargedOrRefunded) {
+    Board b = fresh();
+    const Stockfish::Move mA = first_legal(b, BOARD_A);
+
+    b.set_clocks_visible(false);
+    b.make_moves(mA, Stockfish::MOVE_NONE, Board::WHITE_TEAM);
+    b.set_clocks_visible(true);
+
+    // A clock-blind player's *search* spends nothing, exactly as the engine
+    // behaved before clocks existed. What the game charges for the move it
+    // actually plays is applied separately, with the clocks visible.
+    EXPECT_EQ(b.clocks.get(0, true), 1800);
+    EXPECT_EQ(b.clocks.get(0, false), 1800);
+}
+
+TEST_F(ClockTest, HidingClocksRestoresThePreClockSitRules) {
+    Board b = fresh();
+    // 60s up on the diagonal: comfortably over SIT_THRESHOLD_DCS.
+    b.set_clocks(1800, 1200, 1200, 1800);
+    ASSERT_TRUE(b.team_may_sit(Board::WHITE_TEAM));
+
+    b.set_clocks_visible(false);
+    // team_may_sit still reads the values, but every caller gates on
+    // has_clocks() first, so a blinded search never reaches it and falls back
+    // to the fixed team bit instead.
+    EXPECT_FALSE(b.has_clocks());
+}

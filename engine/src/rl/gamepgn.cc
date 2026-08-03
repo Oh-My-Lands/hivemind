@@ -107,16 +107,32 @@ std::ostream& operator<<(std::ostream& os, const BughouseGamePGN& pgn) {
        << "[Date \"" << pgn.date << "\"]\n"
        << "[Round \"" << pgn.round << "\"]\n"
        << "[Variant \"" << pgn.variant << "\"]\n"
-       << "[TimeControl \"" << pgn.timeControl << "\"]\n"
+       // A clock model is the authority on the time control when there is one.
+       // The string default is "180" and nothing ever set it, so every game
+       // played at any other time control was labelled as a 3-minute game.
+       << "[TimeControl \""
+       << (pgn.initialTimeDcs > 0 ? std::to_string(pgn.initialTimeDcs / 10)
+                                  : pgn.timeControl)
+       << "\"]\n"
        << "[WhiteTeam \"" << pgn.whiteTeam << "\"]\n"
        << "[BlackTeam \"" << pgn.blackTeam << "\"]\n"
        << "[WhiteA \"" << pgn.whiteBoardA << "\"]\n"
        << "[BlackA \"" << pgn.blackBoardA << "\"]\n"
        << "[WhiteB \"" << pgn.whiteBoardB << "\"]\n"
        << "[BlackB \"" << pgn.blackBoardB << "\"]\n"
-       << "[TimeAdvantage \"" << (pgn.whiteTeamHadTimeAdvantage ? pgn.whiteTeam : pgn.blackTeam) << "\"]\n"
        << "[PlyCount \"" << pgn.plyCount << "\"]\n"
        << "[Result \"" << pgn.result << "\"]\n";
+
+    // Time advantage is a property of the game only when there is no clock
+    // model. With clocks it changes hands as they run -- that is the whole
+    // point of Phase 4 -- so naming one team would assert something false
+    // about most of the game. Self-play still has no clock model and still
+    // gets the tag.
+    if (pgn.initialTimeDcs == 0) {
+        os << "[TimeAdvantage \""
+           << (pgn.whiteTeamHadTimeAdvantage ? pgn.whiteTeam : pgn.blackTeam)
+           << "\"]\n";
+    }
     
     if (!pgn.termination.empty()) {
         os << "[Termination \"" << pgn.termination << "\"]\n";

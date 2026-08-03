@@ -74,8 +74,17 @@ struct BughouseGamePGN {
     bool whiteToMoveBoardA = true;
     bool whiteToMoveBoardB = true;
     
-    // Track which team had time advantage (for training purposes)
+    // Track which team had time advantage (for training purposes).
+    //
+    // Only meaningful without a clock model, where the bit is fixed for the
+    // whole game -- which is still how self-play runs. Once initialTimeDcs is
+    // set, time advantage changes hands as the clocks run and no single team
+    // owns it, so the writer suppresses the tag rather than pick a side.
     bool whiteTeamHadTimeAdvantage = false;
+
+    // Initial value of every clock, deciseconds. Zero means no clock model.
+    // Drives both the TimeControl tag and whether TimeAdvantage is written.
+    int initialTimeDcs = 0;
     
     // Game length in plies (half-moves)
     size_t plyCount = 0;

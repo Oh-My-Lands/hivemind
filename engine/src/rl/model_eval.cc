@@ -199,6 +199,9 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
     // If new model is black and doesn't have advantage (old has it), white has advantage
     bool whiteHasTimeAdvantage = (newModelIsWhite == player1HasTimeAdvantage);
     pgn.whiteTeamHadTimeAdvantage = whiteHasTimeAdvantage;
+    // Suppresses the TimeAdvantage tag and drives TimeControl. Set here rather
+    // than in new_game so it survives the per-game reset.
+    pgn.initialTimeDcs = settings.initialTimeDcs;
     
     // Track time for both sides (starting at 180.0, decreasing by 0.1 per move)
     float whiteTime = 180.0f;

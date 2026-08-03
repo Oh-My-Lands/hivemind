@@ -14,6 +14,7 @@ void BughouseGamePGN::new_game() {
     gameMoves.clear();
     result = "*";
     termination = "";
+    endedOnFlag = false;  // must not carry a flag win into the next game
     
     // Reset move counters
     moveNumberBoardA = 1;
@@ -64,10 +65,10 @@ void BughouseGamePGN::set_result(GameResult res) {
     // Set termination message
     switch (res) {
         case GameResult::WHITE_WINS:
-            termination = whiteTeam + " won by checkmate";
+            termination = whiteTeam + (endedOnFlag ? " won on time" : " won by checkmate");
             break;
         case GameResult::BLACK_WINS:
-            termination = blackTeam + " won by checkmate";
+            termination = blackTeam + (endedOnFlag ? " won on time" : " won by checkmate");
             break;
         case GameResult::WHITE_RESIGNS:
             termination = whiteTeam + " resigned";

@@ -85,6 +85,16 @@ struct BughouseGamePGN {
     // Initial value of every clock, deciseconds. Zero means no clock model.
     // Drives both the TimeControl tag and whether TimeAdvantage is written.
     int initialTimeDcs = 0;
+
+    // Whether the game ended on a flag rather than on the board.
+    //
+    // The *result* of a flag win is an ordinary win, which is why GameResult
+    // needs no new outcome. But set_result derived "won by checkmate" from the
+    // result alone, so every flag win was recorded as a mate and the PGN could
+    // not tell the two apart. That made a 1200-game A/B uninterpretable: the
+    // whole question was whether the clock-aware arm was losing on the board or
+    // running itself out of time, and the evidence had been flattened.
+    bool endedOnFlag = false;
     
     // Game length in plies (half-moves)
     size_t plyCount = 0;

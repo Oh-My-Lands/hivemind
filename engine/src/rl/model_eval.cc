@@ -301,6 +301,7 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
         if (board.has_clocks() && board.team_flagged(currentTeam)) {
             result = (currentSide == Stockfish::WHITE) ? GameResult::BLACK_WINS
                                                        : GameResult::WHITE_WINS;
+            pgn.endedOnFlag = true;
             break;
         }
 
@@ -394,36 +395,55 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
         Stockfish::Move moveA = bestAction.moveA;
         Stockfish::Move moveB = bestAction.moveB;
         
-        // Record moves for PGN and opening tracking
-        // Decrement time for current side before recording
-        float currentTime = (currentSide == Stockfish::WHITE) ? whiteTime : blackTime;
-        
-        if (moveA != Stockfish::MOVE_NONE) {
-            string moveStr = board.san_move(0, moveA);
-            pgn.add_move(0, moveStr, currentTime);
+        // SAN has to be read off the position before the move is made, but the
+        // clock has to be read after it is charged -- the field means "time
+        // remaining after move". So the strings are captured here and handed to
+        // add_move below, once the board has advanced.
+        const bool sanA = (moveA != Stockfish::MOVE_NONE);
+        const bool sanB = (moveB != Stockfish::MOVE_NONE);
+        const string moveStrA = sanA ? board.san_move(0, moveA) : string();
+        const string moveStrB = sanB ? board.san_move(1, moveB) : string();
+
+        // Apply the joint move
+        // Charge the mover's clock. Without the acting team this is a no-op,
+        // which is what leaves the clock-free arm behaving as it always did.
+        board.make_moves(moveA, moveB, currentTeam);
+
+        // Clock annotation, seconds. With a clock model this is the real clock
+        // for the player who just moved; the synthetic 180.0 countdown below is
+        // what it used to be, and it tracked nothing -- it decremented 0.1 per
+        // ply regardless of the actual time control, so a PGN from a clocked
+        // game recorded times that had no relationship to the clocks the search
+        // was reasoning about.
+        const bool movingSideIsWhite = (currentSide == Stockfish::WHITE);
+        float fallbackTime = movingSideIsWhite ? whiteTime : blackTime;
+        auto clockFor = [&](int boardNum) -> float {
+            if (!board.has_clocks()) return fallbackTime;
+            // On board B the moving team's member holds the opposite colour:
+            // partners are diagonal, so team White is White on A and Black on B.
+            const bool isWhiteOnThisBoard =
+                (boardNum == 0) ? movingSideIsWhite : !movingSideIsWhite;
+            return board.clocks.get(boardNum, isWhiteOnThisBoard) / 10.0f;
+        };
+
+        if (sanA) {
+            pgn.add_move(0, moveStrA, clockFor(0));
             if (ply < settings.openingMovesToTrack * 2) {
-                gameMoves.push_back({0, moveStr});
+                gameMoves.push_back({0, moveStrA});
             }
         }
-        if (moveB != Stockfish::MOVE_NONE) {
-            string moveStr = board.san_move(1, moveB);
-            pgn.add_move(1, moveStr, currentTime);
+        if (sanB) {
+            pgn.add_move(1, moveStrB, clockFor(1));
             if (ply < settings.openingMovesToTrack * 2) {
-                gameMoves.push_back({1, moveStr});
+                gameMoves.push_back({1, moveStrB});
             }
         }
-        
-        // Decrement time after move is recorded
+
         if (currentSide == Stockfish::WHITE) {
             whiteTime -= 0.1f;
         } else {
             blackTime -= 0.1f;
         }
-        
-        // Apply the joint move
-        // Charge the mover's clock. Without the acting team this is a no-op,
-        // which is what leaves the clock-free arm behaving as it always did.
-        board.make_moves(moveA, moveB, currentTeam);
         ply++;
         
         // Update GUI if enabled

@@ -69,3 +69,38 @@ TEST_F(GamePGNTest, TimeControlStillFollowsTheStringWithoutClocks) {
     // it, which keeps every pre-Phase 4 caller behaving as before.
     EXPECT_TRUE(contains(render(pgn), "[TimeControl \"120\"]"));
 }
+
+TEST_F(GamePGNTest, AFlagWinIsNotRecordedAsCheckmate) {
+    BughouseGamePGN pgn = fresh();
+    pgn.initialTimeDcs = 400;
+    pgn.endedOnFlag = true;
+
+    pgn.set_result(GameResult::WHITE_WINS);
+
+    // The result of a flag win is an ordinary win, which is why GameResult
+    // needs no new outcome -- but recording it as a mate flattened the one
+    // distinction a clock-model A/B exists to measure.
+    EXPECT_EQ(pgn.termination, "Alice won on time");
+    EXPECT_EQ(pgn.result, "1-0");
+}
+
+TEST_F(GamePGNTest, ABoardWinIsStillRecordedAsCheckmate) {
+    BughouseGamePGN pgn = fresh();
+    pgn.initialTimeDcs = 400;
+
+    pgn.set_result(GameResult::BLACK_WINS);
+
+    EXPECT_EQ(pgn.termination, "Bob won by checkmate");
+}
+
+TEST_F(GamePGNTest, NewGameClearsTheFlagOutcome) {
+    BughouseGamePGN pgn = fresh();
+    pgn.endedOnFlag = true;
+
+    pgn.new_game();
+    pgn.set_result(GameResult::WHITE_WINS);
+
+    // 1200 games share one GamePGN; a sticky flag would relabel every
+    // subsequent win in the run.
+    EXPECT_EQ(pgn.termination, "Alice won by checkmate");
+}

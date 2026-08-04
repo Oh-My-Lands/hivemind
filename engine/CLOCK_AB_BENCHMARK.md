@@ -229,3 +229,90 @@ play.
 
 If that is right, this change is a **regression until the network is retrained
 to match**, and the fix is on the evaluator side, not the search side.
+
+---
+
+## What upstream's removal of `engine/src/rl/` costs this harness
+
+Assessed 2026-08-04, against upstream `origin/main` at `f15b64d`. Nothing here
+is merged into this branch yet — this exists so the decision is already costed
+when the clock work is picked back up.
+
+### `param-eval` is gone upstream, and not replaced
+
+Upstream's `566c40c` deletes `engine/src/rl/` outright — all ten files, about
+108 KB. That directory *is* this benchmark: `model_eval.cc` (31 KB) implements
+the `param-eval` subcommand, its per-player settings, and the Elo summary
+quoted above.
+
+It was not moved or rewritten. `origin/main`'s `main.cc` now dispatches only
+`bench` and `perft`; `selfplay`, `eval` and `param-eval` are all gone as
+subcommands, with no replacement offering a two-player match. So merging
+upstream into this branch without deciding this deletes the ability to rerun
+the benchmark.
+
+Merging `origin/main` into this branch conflicts in 16 files, four of them
+modify/delete on `rl/gamepgn.*` and `rl/model_eval.*` — those four are this
+decision, surfacing as conflicts.
+
+### Only half of `rl/` is actually needed
+
+The A/B uses:
+
+| file | why |
+|---|---|
+| `model_eval.{cc,h}` | the `param-eval` harness itself |
+| `gamepgn.{cc,h}` | `--pgn`, which "Reading the result" above requires |
+| `rl_settings.h` | `EvalSettings::initialTimeDcs`, i.e. `--time-control` |
+
+`selfplay.cc`, `training_data_writer.*` and `gui_state_writer.h` are
+training-data machinery this benchmark never calls. Taking upstream's deletion
+for those and keeping only the three above halves the fork-local surface.
+
+### What the port has to fix
+
+Most of what `model_eval.cc` calls survives upstream's refactor unchanged:
+`board.san_move`, `make_moves`, `legal_moves`, `is_checkmate`, `is_draw`, and
+`agent->run_search`. The clock-specific calls (`has_clocks`,
+`set_clocks_visible`, `set_clocks`, `team_may_sit`, `team_flagged`) are this
+branch's own additions and upstream never touched them.
+
+Three things genuinely break:
+
+1. **`Agent::get_root_node()` is gone.** `rootNode` is now a private member of
+   `Agent` with no public accessor. `model_eval.cc` calls it once. Fix: re-add
+   the accessor, one line.
+
+2. **Dirichlet noise is gone entirely** — not just the `SearchOptions` fields
+   but the whole path: `agent.cc`'s application of it, `node.h`'s
+   `apply_dirichlet_noise`, and `utils.h`'s `generate_dirichlet_noise`.
+   `origin/main` contains no reference to dirichlet anywhere in `engine/src`.
+   This costs the A/B **nothing**: `model_eval.cc:260` already sets
+   `dirichletEpsilon = 0.0f` because eval wants no noise. Delete the plumbing
+   rather than restoring it. (Restoring *self-play* is a different matter and
+   would need the whole path back.)
+
+3. **`SearchOptions::selfplay()` and `::eval()` are gone**; only `uci()`
+   remains. Replace those call sites with explicit field assignment.
+
+### Recommendation
+
+Keep-ours on `model_eval.{cc,h}`, `gamepgn.{cc,h}` and `rl_settings.h`; take
+upstream's deletion for the other five files. The one-time fix is small and
+bounded — an accessor, deleting dead noise plumbing, and two constructor call
+sites. The ongoing cost is the real one: those five files become permanently
+fork-maintained against an upstream that has removed them, so every future
+upstream merge re-raises the same four modify/delete conflicts.
+
+### The numbers above are stale regardless
+
+Both runs were measured against a search that no longer exists. Upstream's
+merge changes the search itself: real data-race fixes, ~9.8% more nps, and
+`f15b64d` quadrupling `PW_COEFFICIENT` from 1.0 to 4.0, which widens interior
+progressive widening 8 -> 32 allowed children at 1000 visits. The −26 Elo and
+the on-the-clock/on-the-board split were both produced under the old search.
+
+Rerun before acting on the "regression until the network is retrained"
+conclusion. The distribution-shift explanation is about the value head and is
+probably unaffected, but the decomposition is what this benchmark exists to
+report, and it has not been measured against the current search.

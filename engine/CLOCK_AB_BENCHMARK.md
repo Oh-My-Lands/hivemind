@@ -187,16 +187,38 @@ which still cannot show the net a time advantage changing hands.
 work, not inference: an RTX 4090 ran 8.51 games/min against an A5000's 8.25, a
 3% difference. Rent the cheapest card that provisions, not the fastest.
 
-## Result of the first run
+## Results
 
-1200 games, `tc=400`, shipped net `model-0.97878-0.683-0224-v3.0`:
+Two independent 1200-game runs at `tc=400` against the shipped net
+`model-0.97878-0.683-0224-v3.0`. The second added the PGN instrumentation but
+changed nothing about play, so the two pool legitimately.
 
-```
--26 Elo   95% CI [-46, -6]   z = 2.6, p ≈ 0.01
-```
+| run | W-D-L (aware) | Elo | z |
+|---|---|---|---|
+| 1 | 547-17-636 | −25.8 | 2.57 |
+| 2 | 568-10-622 | −15.6 | **1.56** |
+| **pooled** | 1115-27-1258 | **−20.7** | **2.92** |
 
-Clock-aware is **weaker**, significantly. The termination split (from the
-instrumented re-run) shows why: it wins on time and loses on the board.
+**Note run 2 on its own is not significant** (p ≈ 0.12). Two runs of the same
+configuration landed 10 Elo apart, which is what an SE of ±10 looks like in
+practice and a useful warning against reading a single 1200-game match as
+precise. Only pooled (n=2400, p ≈ 0.003) is the aggregate effect established.
+
+The decomposition is far stronger than the aggregate, and replicated across
+both runs (run 2 shown):
+
+| | aware-blind | n | aware win rate | z |
+|---|---|---|---|---|
+| on the clock | 116-43 | 159 | **73.0%** | 5.79 |
+| on the board | 452-579 | 1031 | **43.8%** | 3.96 |
+
+Flag rate 13.3%. Clock-aware gains +73 games on the clock and loses −127 on the
+board, netting −54.
+
+**This is the result worth carrying forward, not the Elo.** The aggregate is a
+weakly-powered difference of two large opposing effects, so it is noisy by
+construction — which is exactly why runs 1 and 2 disagree on it while agreeing
+closely on the split. If you rerun this benchmark, report the decomposition.
 
 The leading explanation is distribution shift rather than a bug. The network
 was trained with time advantage as a fixed binary sign bit; a search that

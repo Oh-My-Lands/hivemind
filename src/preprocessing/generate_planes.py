@@ -122,16 +122,22 @@ def save_team_action(writer, action, labels, game_result):
     # If Team 1 moved, they represent the "Board 0 Black" perspective
     value = game_result if action["team"] == 0 else -game_result
 
-    has_time_advantage = action["planes"][0][31, 0, 0] > 0.5  # Check if time advantage plane is 1.0
+    # Time advantage is per board: each member races their *diagonal* opponent,
+    # so board A's margin (31) says nothing about board B's (63 = 31 + 32).
+    # Gating both boards on 31 was correct only while the two planes held the
+    # same value, which stopped being true in 92774eb.
+    board_a_time_advantage = action["planes"][0][31, 0, 0] > 0.5
+    board_b_time_advantage = action["planes"][0][63, 0, 0] > 0.5
 
     # Check if boards are on turn (channels 25 and 57)
     board_a_on_turn = action["planes"][0][25, 0, 0] > 0.5  # Board A turn plane
     board_b_on_turn = action["planes"][0][57, 0, 0] > 0.5  # Board B turn plane (channel 57 = 25 + 32)
 
-    # Skip sample if team is down on time and passes on a board that's on turn
-    if not has_time_advantage:
-        if (m0 == 'pass' and board_a_on_turn) or (m1 == 'pass' and board_b_on_turn):
-            return  # Don't add this sample
+    # Skip sample if a board passes while on turn without the time to afford it,
+    # judged against that board's own margin.
+    if (m0 == 'pass' and board_a_on_turn and not board_a_time_advantage) or \
+       (m1 == 'pass' and board_b_on_turn and not board_b_time_advantage):
+        return  # Don't add this sample
 
     writer.add_sample(action["planes"][0], policy_idx, value)
 
@@ -139,15 +145,19 @@ def save_team_action(writer, action, labels, game_result):
     # From the other's team perspective it could be that both board are not on turn so both have to pass
     # Or the case we care more about: only one board is on turn and both boards still pass
     if 'pass' in [m0, m1]:
-        # For the other team's sample, check their time advantage (same channel since it's duplicated)
-        other_has_time_advantage = action["planes"][1][31, 0, 0] > 0.5
+        # For the other team's sample, check their time advantage per board.
+        # These are NOT duplicates of each other -- see the note above.
+        other_board_a_time_advantage = action["planes"][1][31, 0, 0] > 0.5
+        other_board_b_time_advantage = action["planes"][1][63, 0, 0] > 0.5
 
         # For other team's perspective, the turn channels are different
         other_board_a_on_turn = action["planes"][1][25, 0, 0] > 0.5
         other_board_b_on_turn = action["planes"][1][57, 0, 0] > 0.5
 
-        # Skip other team's sample if they're down on time and would pass on a board that's on turn
-        if not other_has_time_advantage and (other_board_a_on_turn or other_board_b_on_turn):
+        # Skip other team's sample if either board would sit while on turn
+        # without the time to afford it, judged per board.
+        if (other_board_a_on_turn and not other_board_a_time_advantage) or \
+           (other_board_b_on_turn and not other_board_b_time_advantage):
             return  # Don't add the other team's sample either
         # Skip if both boards are on turn since it doesn't make any sense to double sit even if up time
         if other_board_a_on_turn and other_board_b_on_turn:

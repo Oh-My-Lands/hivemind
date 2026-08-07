@@ -831,6 +831,12 @@ def export_to_onnx(model, batch_size: int, dummy_input: torch.Tensor, dir: Path,
     if hasattr(model, 'merge_bn'):
         model.merge_bn()
 
+    # dynamo=True explicitly, not left to the torch default. `dynamic_shapes` is
+    # only honoured by the dynamo exporter -- the legacy path wants
+    # `dynamic_axes` instead and raises "the exporter only supports dynamic
+    # shapes through parameter dynamic_axes when dynamo=False". torch 2.8.0
+    # defaulted dynamo off and so failed here; 2.9+ defaults it on. Saying it
+    # outright means the export stops depending on which torch the pod ships.
     torch.onnx.export(model, (dummy_input,), model_filepath,
                       input_names=input_names,
                       output_names=output_names,
@@ -838,7 +844,8 @@ def export_to_onnx(model, batch_size: int, dummy_input: torch.Tensor, dir: Path,
                       export_params=True,
                       opset_version=18,
                       do_constant_folding=True,
-                      keep_initializers_as_inputs=False)
+                      keep_initializers_as_inputs=False,
+                      dynamo=True)
 
     # simplify ONNX model
     # https://github.com/daquexian/onnx-simplifier
@@ -850,6 +857,15 @@ def export_to_onnx(model, batch_size: int, dummy_input: torch.Tensor, dir: Path,
     onnx.save(model_simp, model_filepath)
     if not check:
         raise Exception("Simplified ONNX model could not be validated")
+
+    # The dynamo exporter writes weights to a sidecar <name>.data and onnx.save
+    # then folds them back inline, leaving an orphan the same size as the model
+    # itself. Harmless to load -- nothing references it once the initializers
+    # are inline -- but it doubles what every checkpoint costs on disk, and a
+    # training run exports one per improvement.
+    sidecar = Path(f"{model_filepath}.data")
+    if sidecar.exists():
+        sidecar.unlink()
 
     if has_auxiliary_output:
         # Remove unneeded outputs

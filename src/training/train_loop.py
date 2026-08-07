@@ -1,5 +1,6 @@
 import argparse
 import glob
+import os
 import sys
 from pathlib import Path
 
@@ -20,6 +21,26 @@ from src.architectures.rise_mobile_v3 import get_rise_v33_model
 from src.training.trainer_agent import TrainerAgentPytorch, save_torch_state,\
     load_torch_state, export_to_onnx, get_context, get_data_loader, evaluate_metrics
 from src.training.train_util import get_metrics, value_to_wdl_label, prepare_plys_label
+
+
+def prepare_export_dir(tc, export_dir):
+    """Point `tc.export_dir` at `export_dir` and create what training writes into.
+
+    Two hazards, both of which have bitten:
+
+    - `weights/` is never created by anything downstream, so the first
+      checkpoint dies on a missing directory -- an hour into a rented pod.
+    - `trainer_agent` addresses that directory two different ways:
+      `Path(export_dir) / "weights"` in some places and the string
+      `export_dir + "weights/..."` in others. The string form needs a trailing
+      separator, and `str(Path(...))` strips it, so the two forms silently
+      disagree unless it is put back here.
+    """
+    export_dir = os.path.join(str(export_dir), '')  # guarantee a trailing sep
+    tc.export_dir = export_dir
+    for sub in ('weights', 'logs'):
+        Path(export_dir, sub).mkdir(parents=True, exist_ok=True)
+    return export_dir
 
 
 def get_model_args():
@@ -47,7 +68,15 @@ def train_supervised():
     to = TrainObjects()
     to.metrics = get_metrics(tc)
 
+    # TrainConfig.export_dir defaults to "./" and nothing creates weights/ under
+    # it, so the first checkpoint used to fail on a missing directory.
+    prepare_export_dir(tc, project_root / "src" / "training")
+
     tc.nb_parts = len(glob.glob(main_config['planes_train_dir'] + '*'))
+    if tc.nb_parts == 0:
+        raise ValueError(
+            f"No training shards in {main_config['planes_train_dir']}. "
+            "Run src/preprocessing/generate_planes.py first.")
 
     # Load validation data
     x_val, y_val_value, y_val_policy = load_parquet_shard(
@@ -87,12 +116,10 @@ def train_rl(rl_data_dir: str, val_data_dir: str, checkpoint_path: str = None, a
     to = TrainObjects()
     to.metrics = get_metrics(tc)
     
-    # Set export directory and ensure it exists
-    tc.export_dir = str(project_root / "src/training/")
-    weights_dir = Path(tc.export_dir) / "weights"
-    weights_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir = Path(tc.export_dir) / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    # Set export directory and ensure it exists. Via the helper so the trailing
+    # separator survives -- trainer_agent builds some of these paths by string
+    # concatenation, and str(Path(...)) drops it.
+    weights_dir = Path(prepare_export_dir(tc, project_root / "src" / "training"), "weights")
     
     # Ensure ONNX export is enabled
     tc.export_weights = True

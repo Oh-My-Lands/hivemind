@@ -62,21 +62,60 @@ def get_model_args():
     return Args()
 
 
-def train_supervised():
+def select_planes(planes_dir):
+    """Point the config at one arm's planes, train and val together.
+
+    `main_config` is read directly in two places -- here and
+    `TrainerAgentPytorch.__init__` -- so the override has to land on the dict
+    rather than being threaded through as an argument.
+
+    Both keys move together on purpose. Training arm A's shards against arm B's
+    validation set would run to completion and report plausible numbers while
+    measuring nothing, and it is two independent paths that have to agree for
+    that not to happen.
+    """
+    planes_dir = Path(planes_dir).resolve()
+    train_dir, val_dir = planes_dir / "train", planes_dir / "val"
+
+    for name, d in (("train", train_dir), ("val", val_dir)):
+        if not d.is_dir():
+            raise ValueError(
+                f"{planes_dir} has no {name}/ directory. Generate it with "
+                f"src/preprocessing/generate_planes.py --planes-dir {planes_dir}")
+
+    main_config['planes_train_dir'] = os.path.join(str(train_dir), '')
+    main_config['planes_val_dir'] = os.path.join(str(val_dir), '')
+    return planes_dir
+
+
+def train_supervised(planes_dir=None, export_dir=None):
     """Run supervised learning training on human game data."""
     tc = TrainConfig()
     to = TrainObjects()
     to.metrics = get_metrics(tc)
 
-    # TrainConfig.export_dir defaults to "./" and nothing creates weights/ under
-    # it, so the first checkpoint used to fail on a missing directory.
-    prepare_export_dir(tc, project_root / "src" / "training")
+    if planes_dir is not None:
+        planes_dir = select_planes(planes_dir)
 
-    tc.nb_parts = len(glob.glob(main_config['planes_train_dir'] + '*'))
+    # Derived from the planes directory rather than fixed, so the two Phase 2
+    # arms cannot collide. They would otherwise share src/training/weights/, and
+    # delete_previous_weights() removes *every* file there -- so training arm B
+    # after arm A would destroy the baseline it is meant to be compared against,
+    # silently and after the pod time had already been paid for.
+    if export_dir is None:
+        run_name = planes_dir.name if planes_dir is not None else "default"
+        export_dir = project_root / "src" / "training" / "runs" / run_name
+    prepare_export_dir(tc, export_dir)
+
+    tc.nb_parts = len(glob.glob(main_config['planes_train_dir'] + '*.parquet'))
     if tc.nb_parts == 0:
         raise ValueError(
             f"No training shards in {main_config['planes_train_dir']}. "
             "Run src/preprocessing/generate_planes.py first.")
+
+    print(f"train shards  {tc.nb_parts} from {main_config['planes_train_dir']}")
+    print(f"val set       {main_config['planes_val_dir']}evaluation_shard.parquet")
+    print(f"exporting to  {tc.export_dir}")
 
     # Load validation data
     x_val, y_val_value, y_val_policy = load_parquet_shard(
@@ -221,10 +260,18 @@ if __name__ == '__main__':
                         help='Directory containing RL validation parquet files')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint to resume training from')
-    
+    parser.add_argument('--planes-dir', type=str, default=None,
+                        help="Which arm to train, e.g. data/planes-binary or "
+                             "data/planes-continuous. Selects train/ and val/ "
+                             "together, and gives the run its own export "
+                             "directory so the two arms cannot overwrite each "
+                             "other. Defaults to whatever main_config points at.")
+    parser.add_argument('--export-dir', type=str, default=None,
+                        help='Override where weights and logs are written.')
+
     args = parser.parse_args()
 
     if args.mode == 'sl':
-        train_supervised()
+        train_supervised(planes_dir=args.planes_dir, export_dir=args.export_dir)
     else:
         train_rl(args.rl_data_dir, args.val_data_dir, checkpoint_path=args.checkpoint)

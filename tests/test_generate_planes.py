@@ -14,26 +14,34 @@ def test_generated_planes_validation():
     labels = make_map()
     pass_label_idx = labels.index('pass')
 
-    # Get all parquet files in the training data directory. Relative to the repo
-    # root, where pytest runs -- "../data/planes/train" resolved outside the
-    # checkout, so this test skipped itself on every run it had ever had.
-    train_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data", "planes", "train")
+    # Resolved against the repo root, not the CWD -- "../data/planes/train"
+    # pointed outside the checkout, so this test skipped itself on every run it
+    # had ever had.
+    #
+    # Every generated arm is checked, not just one. The invariant is a property
+    # of the encoder, so an arm that violated it while its sibling did not is
+    # exactly the case worth catching.
+    data_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    train_dirs = sorted(
+        d for d in glob.glob(os.path.join(data_dir, "planes*", "train"))
+        if os.path.isdir(d))
 
-    if not os.path.exists(train_dir):
-        pytest.skip(f"Training data directory {train_dir} not found")
+    if not train_dirs:
+        pytest.skip(f"No generated planes under {data_dir}/planes*/train")
 
-    parquet_files = glob.glob(os.path.join(train_dir, "*.parquet"))
+    parquet_files = [f for d in train_dirs
+                     for f in sorted(glob.glob(os.path.join(d, "*.parquet")))[:5]]
 
     if not parquet_files:
-        pytest.skip(f"No parquet files found in {train_dir}")
+        pytest.skip(f"No parquet files found under {train_dirs}")
 
     total_samples = 0
     violation_count = 0
 
-    # Process each parquet file
-    for file_path in parquet_files[:10]:
+    # Process each parquet file -- the per-arm cap is applied above, so every
+    # arm is represented rather than the first one filling the budget.
+    for file_path in parquet_files:
         df = pl.read_parquet(file_path)
 
         # Extract data from the parquet file

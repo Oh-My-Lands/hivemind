@@ -50,7 +50,8 @@ def train_supervised():
     tc.nb_parts = len(glob.glob(main_config['planes_train_dir'] + '*'))
 
     # Load validation data
-    x_val, y_val_value, y_val_policy = load_parquet_shard('../../data/planes/val/evaluation_shard.parquet')
+    x_val, y_val_value, y_val_policy = load_parquet_shard(
+        main_config['planes_val_dir'] + 'evaluation_shard.parquet')
     dataset = TensorDataset(x_val, y_val_value, y_val_policy)
     val_data = DataLoader(dataset, batch_size=tc.batch_size, shuffle=False)
 

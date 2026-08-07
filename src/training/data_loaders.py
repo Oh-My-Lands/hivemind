@@ -63,9 +63,17 @@ def load_parquet_shard(file_path):
     # Read the parquet file
     df = pl.read_parquet(file_path)
 
-    # 1. Process X (Planes): Convert list of floats to (Batch, 64, 8, 8)
-    # If x is stored as a flat list of 4096 values, reshape it.
-    x_tensor = torch.tensor(df['x'].to_list(), dtype=torch.float32).view(-1, 64, 8, 8)
+    # 1. Process X (Planes): ShardWriter stores each sample as 4096 raw uint8
+    # bytes, not as a list of numbers, so this has to go through frombuffer --
+    # the same treatment load_rl_parquet_shard applies to C++-written shards.
+    x_arr = np.stack([np.frombuffer(b, dtype=np.uint8) for b in df['x']]).astype(np.float32)
+    x_tensor = torch.tensor(x_arr, dtype=torch.float32).view(-1, 64, 8, 8)
+
+    # Pocket planes are persisted as raw counts (0-16) and the network expects
+    # count / MAX_NUM_DROPS, matching engine/src/planes.cc. This inverts the
+    # rescale ShardWriter.add_sample applies on write.
+    x_tensor[:, 12:22, :, :] /= 16.0
+    x_tensor[:, 44:54, :, :] /= 16.0
 
     # 2. Process Y_Value
     y_val_tensor = torch.tensor(df['y_value'].to_list(), dtype=torch.float32)

@@ -12,6 +12,15 @@ class TrainingGameReader:
         """
         :param row: A dictionary representing a row from the joined Polars dataframe.
         """
+        # 0. Identity. Set before anything that can bail out, so a caller can
+        # always tell which game a reader came from. pair_key is identical for
+        # the two rows of one game -- the join emits one row per *board*, so a
+        # split drawn on game_id alone would put board A and board B of the same
+        # game on opposite sides of a train/val boundary.
+        self.game_id = str(row.get("game_id", ""))
+        self.partner_game_id = str(row.get("partner_game_id", ""))
+        self.pair_key = min(self.game_id, self.partner_game_id)
+
         # 1. Basic Metadata (Time control in deciseconds)
         try:
             self.time_control = int(row["time_control"]) * 10

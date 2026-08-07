@@ -1,3 +1,4 @@
+import hashlib
 import os
 import chess
 import numpy as np
@@ -5,22 +6,42 @@ import polars as pl
 from tqdm import tqdm
 import uuid
 
+from src.constants import MAX_NUM_DROPS
 from src.domain.board import BughouseBoard
 from src.domain.board2planes import board2planes
 from src.domain.move2planes import mirrorMoveUCI, make_map
 from src.utils.game_reader import TrainingGameReader, process_parquet_file
 
+# Pocket planes, per board. board2planes writes these as count / MAX_NUM_DROPS
+# to match engine/src/planes.cc, so they are the only non-integral channels in
+# the tensor -- see ShardWriter.add_sample.
+POCKET_SLICE_A = slice(12, 22)
+POCKET_SLICE_B = slice(44, 54)
+
 
 class ShardWriter:
-    def __init__(self, output_dir, samples_per_shard=2 ** 16):
+    def __init__(self, output_dir, samples_per_shard=2 ** 16, shard_name=None):
         self.output_dir = output_dir
         self.samples_per_shard = samples_per_shard
+        self.shard_name = shard_name
         self.buffer = []
         os.makedirs(output_dir, exist_ok=True)
 
     def add_sample(self, x, policy_idx, value):
+        # Planes are persisted as uint8, but board2planes emits pockets as
+        # count / MAX_NUM_DROPS -- 1/16 = 0.0625, which the cast truncates to 0.
+        # Left alone this zeroes 20 of the 64 channels and trains the net to
+        # believe no piece is ever droppable. Store raw counts instead, which is
+        # also what engine/src/rl/training_data_writer.cc stores and what
+        # load_rl_parquet_shard already expects; the loader divides by 16.
+        # Rescaling here rather than in board2planes keeps that function an
+        # exact mirror of engine/src/planes.cc.
+        x = np.array(x, copy=True)
+        x[POCKET_SLICE_A] *= MAX_NUM_DROPS
+        x[POCKET_SLICE_B] *= MAX_NUM_DROPS
+
         self.buffer.append({
-            "x": x.astype(np.uint8).tobytes(),
+            "x": np.rint(x).astype(np.uint8).tobytes(),
             "y_policy_idx": (int(policy_idx[0]), int(policy_idx[1])),
             "y_value": float(value)
         })
@@ -29,30 +50,58 @@ class ShardWriter:
 
     def write_shard(self):
         if not self.buffer: return
-        shard_id = uuid.uuid4().hex[:8]
-        save_path = os.path.join(self.output_dir, f"shard_{shard_id}.parquet")
+        name = self.shard_name or f"shard_{uuid.uuid4().hex[:8]}.parquet"
+        save_path = os.path.join(self.output_dir, name)
         pl.DataFrame(self.buffer).write_parquet(save_path, compression="zstd")
         print(f"Saved {len(self.buffer)} samples to {save_path}")
         self.buffer = []
 
 
-def generate_planes(samples_per_shard=2 ** 16):
+def is_validation_pair(pair_key, val_fraction=0.02):
+    """Deterministically hold out a fraction of *games* for validation.
+
+    Keyed on pair_key so both boards of a game land on the same side; splitting
+    per row would leak board A into train while board B sits in val, and the two
+    are the same game seen from two seats. Hashed rather than sampled so the
+    split is reproducible across runs, and md5 rather than hash() because the
+    latter is salted per process.
+    """
+    digest = hashlib.md5(pair_key.encode()).digest()
+    return (int.from_bytes(digest[:4], "big") / 2 ** 32) < val_fraction
+
+
+def generate_planes(samples_per_shard=2 ** 16, val_fraction=0.02):
     labels = make_map()
     data_dir = 'data'
     games_path = os.path.join(data_dir, 'games.parquet')
     output_dir = os.path.join(data_dir, 'planes', 'train')
-    writer = ShardWriter(output_dir, samples_per_shard)
+    train_writer = ShardWriter(output_dir, samples_per_shard)
+
+    # train_loop.train_supervised loads the validation set as a single file, so
+    # it is buffered whole and written once at the end rather than sharded.
+    val_writer = ShardWriter(os.path.join(data_dir, 'planes', 'val'),
+                             samples_per_shard=2 ** 62,
+                             shard_name='evaluation_shard.parquet')
 
     # 2200, not 2400, on purpose. The corpus is seeded at 2400 so every board
     # being analysed clears that bar, but this filter applies to all four
     # players -- raising it here would re-drop every pair whose partner board
     # sits between the two, which measurement showed is ~85% of them.
     game_gen = process_parquet_file(games_path, min_rating=2200)
-    print("Starting plane generation...")
+    print(f"Starting plane generation... (val fraction {val_fraction:.1%}, split on game)")
+
+    n_train_games = n_val_games = 0
 
     for reader in tqdm(game_gen, desc='Processing games'):
         if reader.time_control == -1:
             continue
+
+        if is_validation_pair(reader.pair_key, val_fraction):
+            writer = val_writer
+            n_val_games += 1
+        else:
+            writer = train_writer
+            n_train_games += 1
 
         try:
             board = BughouseBoard(reader.time_control)
@@ -105,7 +154,10 @@ def generate_planes(samples_per_shard=2 ** 16):
         except Exception as e:
             print(f'Error processing game: {e}')
 
-    writer.write_shard()
+    train_writer.write_shard()
+    val_writer.write_shard()
+    print(f"Split on game: {n_train_games} train games, {n_val_games} val games "
+          f"({n_val_games / max(n_train_games + n_val_games, 1):.2%})")
 
 
 def save_team_action(writer, action, labels, game_result):

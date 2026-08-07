@@ -6,6 +6,8 @@ import numpy as np
 import polars as pl
 import torch
 
+from src.domain.time_encoding import dequantize_planes
+
 
 # Constants matching C++ code
 NB_INPUT_CHANNELS = 64
@@ -69,11 +71,11 @@ def load_parquet_shard(file_path):
     x_arr = np.stack([np.frombuffer(b, dtype=np.uint8) for b in df['x']]).astype(np.float32)
     x_tensor = torch.tensor(x_arr, dtype=torch.float32).view(-1, 64, 8, 8)
 
-    # Pocket planes are persisted as raw counts (0-16) and the network expects
-    # count / MAX_NUM_DROPS, matching engine/src/planes.cc. This inverts the
-    # rescale ShardWriter.add_sample applies on write.
-    x_tensor[:, 12:22, :, :] /= 16.0
-    x_tensor[:, 44:54, :, :] /= 16.0
+    # Invert the storage quantisation: pockets back from raw 0-16 counts to
+    # count / MAX_NUM_DROPS, and the sit-margin planes back through their affine
+    # map. Shared with load_rl_parquet_shard and with the writer, so the three
+    # cannot drift apart.
+    dequantize_planes(x_tensor)
 
     # 2. Process Y_Value
     y_val_tensor = torch.tensor(df['y_value'].to_list(), dtype=torch.float32)
@@ -108,10 +110,13 @@ def load_rl_parquet_shard(file_path):
         planes = np.frombuffer(x_bytes, dtype=np.uint8).astype(np.float32)
         x_list.append(planes)
     x_tensor = torch.tensor(np.stack(x_list), dtype=torch.float32).view(-1, 64, 8, 8)
-    
-    # Normalize pocket planes (channels 12-21 and 44-53): stored as 0-16, convert to 0.0-1.0
-    x_tensor[:, 12:22, :, :] /= 16.0
-    x_tensor[:, 44:54, :, :] /= 16.0
+
+    # Pockets from raw 0-16 counts, as in the supervised loader -- but the
+    # margin planes are NOT affine-mapped here. training_data_writer.cc stores
+    # them as a raw 0/1, because self-play's time-advantage flag is a per-game
+    # parity constant rather than a clock. Inverting the affine map over that
+    # would read a stored 1 as -1.27.
+    dequantize_planes(x_tensor, margins_are_affine=False)
 
     # Process Y_Value
     y_val_tensor = torch.tensor(df['y_value'].to_list(), dtype=torch.float32)

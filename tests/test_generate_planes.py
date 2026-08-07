@@ -14,8 +14,12 @@ def test_generated_planes_validation():
     labels = make_map()
     pass_label_idx = labels.index('pass')
 
-    # Get all parquet files in the training data directory
-    train_dir = "../data/planes/train"
+    # Get all parquet files in the training data directory. Relative to the repo
+    # root, where pytest runs -- "../data/planes/train" resolved outside the
+    # checkout, so this test skipped itself on every run it had ever had.
+    train_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data", "planes", "train")
 
     if not os.path.exists(train_dir):
         pytest.skip(f"Training data directory {train_dir} not found")

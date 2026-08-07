@@ -40,7 +40,7 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_executable(hivemind_logic_tests test_time_control.cc)
+add_executable(hivemind_logic_tests test_time_control.cc test_time_encoding.cc)
 target_include_directories(hivemind_logic_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(hivemind_logic_tests PRIVATE gtest_main)
 

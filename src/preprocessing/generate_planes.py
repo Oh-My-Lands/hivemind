@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import os
 import chess
@@ -6,17 +7,13 @@ import polars as pl
 from tqdm import tqdm
 import uuid
 
-from src.constants import MAX_NUM_DROPS
 from src.domain.board import BughouseBoard
 from src.domain.board2planes import board2planes
 from src.domain.move2planes import mirrorMoveUCI, make_map
+from src.domain.time_encoding import (TIME_PLANE_CHANNEL_A,
+                                      TIME_PLANE_CHANNEL_B, TimeEncoding,
+                                      quantize_planes)
 from src.utils.game_reader import TrainingGameReader, process_parquet_file
-
-# Pocket planes, per board. board2planes writes these as count / MAX_NUM_DROPS
-# to match engine/src/planes.cc, so they are the only non-integral channels in
-# the tensor -- see ShardWriter.add_sample.
-POCKET_SLICE_A = slice(12, 22)
-POCKET_SLICE_B = slice(44, 54)
 
 
 class ShardWriter:
@@ -28,20 +25,13 @@ class ShardWriter:
         os.makedirs(output_dir, exist_ok=True)
 
     def add_sample(self, x, policy_idx, value):
-        # Planes are persisted as uint8, but board2planes emits pockets as
-        # count / MAX_NUM_DROPS -- 1/16 = 0.0625, which the cast truncates to 0.
-        # Left alone this zeroes 20 of the 64 channels and trains the net to
-        # believe no piece is ever droppable. Store raw counts instead, which is
-        # also what engine/src/rl/training_data_writer.cc stores and what
-        # load_rl_parquet_shard already expects; the loader divides by 16.
-        # Rescaling here rather than in board2planes keeps that function an
-        # exact mirror of engine/src/planes.cc.
-        x = np.array(x, copy=True)
-        x[POCKET_SLICE_A] *= MAX_NUM_DROPS
-        x[POCKET_SLICE_B] *= MAX_NUM_DROPS
-
+        # quantize_planes is the single write boundary: it rescales pockets out
+        # of their count / MAX_NUM_DROPS form (a bare uint8 cast truncates 1/16
+        # to 0 and zeroes twenty channels) and affine-maps the signed margin
+        # planes (a bare cast wraps every negative one). data_loaders
+        # .dequantize_planes is its exact inverse.
         self.buffer.append({
-            "x": np.rint(x).astype(np.uint8).tobytes(),
+            "x": quantize_planes(np.asarray(x)).tobytes(),
             "y_policy_idx": (int(policy_idx[0]), int(policy_idx[1])),
             "y_value": float(value)
         })
@@ -70,16 +60,23 @@ def is_validation_pair(pair_key, val_fraction=0.02):
     return (int.from_bytes(digest[:4], "big") / 2 ** 32) < val_fraction
 
 
-def generate_planes(samples_per_shard=2 ** 16, val_fraction=0.02):
+def generate_planes(samples_per_shard=2 ** 16, val_fraction=0.02,
+                    time_encoding=TimeEncoding.BINARY, planes_dir=None,
+                    max_games=None):
     labels = make_map()
     data_dir = 'data'
     games_path = os.path.join(data_dir, 'games.parquet')
-    output_dir = os.path.join(data_dir, 'planes', 'train')
-    train_writer = ShardWriter(output_dir, samples_per_shard)
+
+    # Each Phase 2 arm gets its own directory. They must be generated from this
+    # one code path, differing only in `time_encoding` -- training an arm on
+    # separately-produced planes reintroduces exactly the corpus confound the
+    # A/B exists to avoid (TIME_MODEL_PLAN.md, "The baseline trap").
+    planes_dir = planes_dir or os.path.join(data_dir, 'planes')
+    train_writer = ShardWriter(os.path.join(planes_dir, 'train'), samples_per_shard)
 
     # train_loop.train_supervised loads the validation set as a single file, so
     # it is buffered whole and written once at the end rather than sharded.
-    val_writer = ShardWriter(os.path.join(data_dir, 'planes', 'val'),
+    val_writer = ShardWriter(os.path.join(planes_dir, 'val'),
                              samples_per_shard=2 ** 62,
                              shard_name='evaluation_shard.parquet')
 
@@ -88,11 +85,19 @@ def generate_planes(samples_per_shard=2 ** 16, val_fraction=0.02):
     # players -- raising it here would re-drop every pair whose partner board
     # sits between the two, which measurement showed is ~85% of them.
     game_gen = process_parquet_file(games_path, min_rating=2200)
-    print(f"Starting plane generation... (val fraction {val_fraction:.1%}, split on game)")
+    print(f"Starting plane generation... (time encoding {time_encoding.value}, "
+          f"val fraction {val_fraction:.1%}, split on game)")
+    print(f"Writing to {planes_dir}")
 
     n_train_games = n_val_games = 0
 
-    for reader in tqdm(game_gen, desc='Processing games'):
+    for n_seen, reader in enumerate(tqdm(game_gen, desc='Processing games')):
+        # A full pass is ~2 hours, so --max-games exists to make the encoding
+        # arms comparable in seconds before committing to that. Applied before
+        # the time_control filter so both arms consume the same prefix.
+        if max_games is not None and n_seen >= max_games:
+            break
+
         if reader.time_control == -1:
             continue
 
@@ -131,7 +136,9 @@ def generate_planes(samples_per_shard=2 ** 16, val_fraction=0.02):
                 if current_action["planes"] is None:
                     # 'perspective_side' represents the perspective for board2planes
                     perspective_side = chess.WHITE if moving_team == 0 else chess.BLACK
-                    current_action["planes"] = (board2planes(board, perspective_side), board2planes(board, not perspective_side))
+                    current_action["planes"] = (
+                        board2planes(board, perspective_side, time_encoding=time_encoding),
+                        board2planes(board, not perspective_side, time_encoding=time_encoding))
                     current_action["team"] = moving_team
 
                 # Canonicalize the move
@@ -178,8 +185,13 @@ def save_team_action(writer, action, labels, game_result):
     # so board A's margin (31) says nothing about board B's (63 = 31 + 32).
     # Gating both boards on 31 was correct only while the two planes held the
     # same value, which stopped being true in 92774eb.
-    board_a_time_advantage = action["planes"][0][31, 0, 0] > 0.5
-    board_b_time_advantage = action["planes"][0][63, 0, 0] > 0.5
+    #
+    # The threshold is > 0.0, not > 0.5, so it reads the same under both
+    # encodings: BINARY stores 1.0 exactly when CONTINUOUS stores a positive
+    # squashed margin. That is what holds training-set composition fixed across
+    # the two arms, leaving the encoding as the only difference between them.
+    board_a_time_advantage = action["planes"][0][TIME_PLANE_CHANNEL_A, 0, 0] > 0.0
+    board_b_time_advantage = action["planes"][0][TIME_PLANE_CHANNEL_B, 0, 0] > 0.0
 
     # Check if boards are on turn (channels 25 and 57)
     board_a_on_turn = action["planes"][0][25, 0, 0] > 0.5  # Board A turn plane
@@ -199,8 +211,8 @@ def save_team_action(writer, action, labels, game_result):
     if 'pass' in [m0, m1]:
         # For the other team's sample, check their time advantage per board.
         # These are NOT duplicates of each other -- see the note above.
-        other_board_a_time_advantage = action["planes"][1][31, 0, 0] > 0.5
-        other_board_b_time_advantage = action["planes"][1][63, 0, 0] > 0.5
+        other_board_a_time_advantage = action["planes"][1][TIME_PLANE_CHANNEL_A, 0, 0] > 0.0
+        other_board_b_time_advantage = action["planes"][1][TIME_PLANE_CHANNEL_B, 0, 0] > 0.0
 
         # For other team's perspective, the turn channels are different
         other_board_a_on_turn = action["planes"][1][25, 0, 0] > 0.5
@@ -218,4 +230,25 @@ def save_team_action(writer, action, labels, game_result):
         writer.add_sample(action["planes"][1], (labels.index('pass'), labels.index('pass')), -value)
 
 if __name__ == '__main__':
-    generate_planes()
+    parser = argparse.ArgumentParser(
+        description="Generate training planes from data/games.parquet.")
+    parser.add_argument(
+        '--time-encoding', choices=[e.value for e in TimeEncoding],
+        default=TimeEncoding.BINARY.value,
+        help="Sit-margin representation in channels 31/63. 'binary' is arm A "
+             "(the deployed network's encoding), 'continuous' is arm B.")
+    parser.add_argument(
+        '--planes-dir', default=None,
+        help="Output directory, containing train/ and val/. Defaults to "
+             "data/planes. Give each arm its own so they do not overwrite.")
+    parser.add_argument('--val-fraction', type=float, default=0.02)
+    parser.add_argument(
+        '--max-games', type=int, default=None,
+        help="Stop after this many game readers. For smoke-testing both arms "
+             "cheaply before committing to a full ~2 h pass.")
+    args = parser.parse_args()
+
+    generate_planes(val_fraction=args.val_fraction,
+                    time_encoding=TimeEncoding(args.time_encoding),
+                    planes_dir=args.planes_dir,
+                    max_games=args.max_games)

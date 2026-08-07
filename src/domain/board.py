@@ -3,6 +3,8 @@ from typing import List
 import chess
 from chess.variant import CrazyhouseBoard, CrazyhousePocket
 
+from src.constants import BOARD_A, BOARD_B
+
 
 class BughouseBoard(object):
     def __init__(self, time_control: int = 1800) -> None:
@@ -74,6 +76,37 @@ class BughouseBoard(object):
 
     def time_advantage(self, side: chess.Color) -> int:
         return self.times[0][side] - self.times[1][side]
+
+    def sit_margin(self, team_side: chess.Color, board_num: int) -> int:
+        """Signed deciseconds by which this team's player on `board_num` leads
+        their diagonal opponent.
+
+        The team identified by `team_side` plays `team_side` on board A and
+        `not team_side` on board B, so each member's diagonal opponent is the
+        player of *their own colour* on the other board. Positive means that
+        member can outsit the opponent who gates their supply of pieces.
+
+        `time_advantage(team_side)` is the board-A case of this; board B is a
+        genuinely different number and had been sharing board A's value until
+        92774eb.
+
+        Note `self.times` is indexed `[board][colour]` with the python-chess
+        convention, where `chess.WHITE is True`, so index 1 is white and index
+        0 is black. Stockfish orders colours the other way round, which is why
+        the C++ mirror (engine/src/time_control.h) documents the same trap on
+        its own index.
+        """
+        if board_num == BOARD_A:
+            return self.times[0][team_side] - self.times[1][team_side]
+        return self.times[1][not team_side] - self.times[0][not team_side]
+
+    def team_uptime(self, team_side: chess.Color) -> int:
+        """Signed deciseconds of clock the team holds over its opponents.
+
+        The sum of both members' diagonal margins, matching
+        `getTeamTimeDiffDeciseconds` in the viewer.
+        """
+        return self.sit_margin(team_side, BOARD_A) + self.sit_margin(team_side, BOARD_B)
 
     def update_time(self, board_num: int, time_left: int, move_time: int) -> None:
         board = self.boards[board_num]

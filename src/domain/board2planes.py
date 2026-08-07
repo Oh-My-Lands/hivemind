@@ -3,11 +3,14 @@ import chess.variant
 import numpy as np
 
 from src.domain.board import BughouseBoard
+from src.domain.time_encoding import (TIME_PLANE_CHANNEL_A, TimeEncoding,
+                                      encode_margin)
 from src.constants import (BOARD_A, BOARD_B, BOARD_HEIGHT, BOARD_WIDTH,
                            MAX_NUM_DROPS, NUM_BUGHOUSE_CHANNELS)
 
 
-def board2planes(board: BughouseBoard, team_side: chess.Color, flip=False) -> np.ndarray:
+def board2planes(board: BughouseBoard, team_side: chess.Color, flip=False,
+                 time_encoding: TimeEncoding = TimeEncoding.BINARY) -> np.ndarray:
     offset = NUM_BUGHOUSE_CHANNELS // 2
     planes = np.zeros((NUM_BUGHOUSE_CHANNELS, BOARD_HEIGHT, BOARD_WIDTH), dtype=float)
 
@@ -78,13 +81,15 @@ def board2planes(board: BughouseBoard, team_side: chess.Color, flip=False) -> np
     planes[26][:, :] = 1.0
     planes[offset + 26][:, :] = 1.0
 
-    # has time advantage (can sit), per board: each member races their *diagonal*
-    # opponent (same colour, other board), so the two boards carry different
-    # margins. time_advantage(s) = A.s - B.s, which is the board A member's; the
-    # board B member plays the opposite colour, so theirs is the negation of
-    # time_advantage(not team_side).
-    planes[31][:, :] = 1.0 if board.time_advantage(team_side) > 0 else 0.0
-    planes[offset + 31][:, :] = 1.0 if board.time_advantage(not team_side) < 0 else 0.0
+    # sit margin, per board: each member races their *diagonal* opponent (same
+    # colour, other board), so the two boards carry different margins. Under
+    # BINARY this is the sign bit the deployed network expects; under CONTINUOUS
+    # it is the squashed magnitude, which is the whole Phase 2 hypothesis. The
+    # two agree on sign, so nothing downstream of the sign changes between arms.
+    planes[TIME_PLANE_CHANNEL_A][:, :] = encode_margin(
+        board.sit_margin(team_side, BOARD_A), time_encoding)
+    planes[offset + TIME_PLANE_CHANNEL_A][:, :] = encode_margin(
+        board.sit_margin(team_side, BOARD_B), time_encoding)
 
     if flip:
         a_block = planes[:offset].copy()

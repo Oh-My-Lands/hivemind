@@ -342,6 +342,7 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
     for (auto* st : searchThreads) {
         st->set_root_node(rootNode.get());
         st->set_search_info(&searchInfo);
+        st->set_time_encoding(options.timeEncoding);
         if (SearchParams::ENABLE_MCGS) {
             st->set_transposition_table(transpositionTable.get());
         }

@@ -15,7 +15,27 @@
 #include <cuda_runtime.h>
 #include <cstring>
 
-using namespace std; 
+using namespace std;
+
+/**
+ * @brief Parses a --*-encoding argument, rejecting anything unrecognised.
+ *
+ * Deliberately fails the run rather than falling back to a default: a typo'd
+ * encoding silently feeds a network the wrong input distribution, and the
+ * result of that is a finished match with a believable Elo number in it.
+ */
+static bool parse_time_encoding(const string& value, TimeEncoding::Mode& out) {
+    if (value == "binary") {
+        out = TimeEncoding::Mode::BINARY;
+        return true;
+    }
+    if (value == "continuous") {
+        out = TimeEncoding::Mode::CONTINUOUS;
+        return true;
+    }
+    cerr << "Error: unknown time encoding '" << value << "' (expected binary or continuous)" << endl;
+    return false;
+}
 
 void printUsage(const char* progName) {
     cout << "Usage: " << progName << " [options]" << endl;
@@ -36,6 +56,11 @@ void printUsage(const char* progName) {
     cout << "    --verbose        Print each game result" << endl;
     cout << "    --pgn <path>     Save games to PGN file" << endl;
     cout << "    --gui            Enable web GUI for live viewing" << endl;
+    cout << "    --time-control <ds> Starting clock on all four clocks, deciseconds" << endl;
+    cout << "                     (0 = no clock model; 400 is the calibrated working value)" << endl;
+    cout << "    --new-encoding <m>  Sit-margin encoding the new net was trained on:" << endl;
+    cout << "                     binary or continuous (default: binary)" << endl;
+    cout << "    --old-encoding <m>  Same, for the old net (default: binary)" << endl;
     cout << endl;
     cout << "  param-eval         Test same model with different search parameters" << endl;
     cout << "                     --time-control <ds> enables the clock model (0 = off)" << endl;
@@ -204,16 +229,43 @@ int main(int argc, char* argv[]) {
             } else if (arg == "--gui-path" && i + 1 < argc) {
                 settings.guiStatePath = argv[++i];
                 settings.enableGui = true;
+            } else if (arg == "--time-control" && i + 1 < argc) {
+                // Deciseconds on all four clocks, as in param-eval. Without it
+                // the clock model is off and channels 31 and 63 are a constant
+                // team bit -- which makes any comparison of two clock encodings
+                // vacuous, since the quantity under test never varies.
+                settings.initialTimeDcs = stoi(argv[++i]);
+            } else if (arg == "--new-encoding" && i + 1 < argc) {
+                if (!parse_time_encoding(argv[++i], settings.player1.timeEncoding)) {
+                    return EXIT_FAILURE;
+                }
+            } else if (arg == "--old-encoding" && i + 1 < argc) {
+                if (!parse_time_encoding(argv[++i], settings.player2.timeEncoding)) {
+                    return EXIT_FAILURE;
+                }
             }
         }
-        
+
         // Validate model paths
         if (newModelPath.empty() || oldModelPath.empty()) {
             cerr << "Error: Both --new and --old model paths are required" << endl;
             cerr << "Usage: " << argv[0] << " eval --new <path> --old <path> [options]" << endl;
             return EXIT_FAILURE;
         }
-        
+
+        // An encoding is a claim about how a network was trained, and a wrong
+        // claim produces a plausible-looking result rather than an error. State
+        // both, every run, in the output that gets pasted into the writeup.
+        cout << "  New model encoding: "
+             << (settings.player1.timeEncoding == TimeEncoding::Mode::CONTINUOUS
+                     ? "continuous" : "binary") << endl;
+        cout << "  Old model encoding: "
+             << (settings.player2.timeEncoding == TimeEncoding::Mode::CONTINUOUS
+                     ? "continuous" : "binary") << endl;
+        cout << "  Time control: " << settings.initialTimeDcs << " ds"
+             << (settings.initialTimeDcs == 0 ? "  (no clock model -- the margin planes are constant)" : "")
+             << endl;
+
         run_model_eval(newModelPath, oldModelPath, settings);
         
         return EXIT_SUCCESS;

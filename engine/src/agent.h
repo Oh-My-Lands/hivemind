@@ -29,9 +29,14 @@ struct SearchOptions {
     int multiPV = 1;             // Number of principal variations to output
     int analysisBoard = 0;       // Board whose moves MultiPV lines are grouped by (0 = A, 1 = B)
 
-    // Self-play exploration options  
+    // Self-play exploration options
     float dirichletAlpha = 0.0f;   // Dirichlet noise alpha (0 = no noise)
     float dirichletEpsilon = 0.0f; // Fraction of prior to replace with noise (0 = no noise)
+
+    // Which representation of the sit margin channels 31 and 63 carry. This is
+    // a property of the *network* being searched with, not of the position, so
+    // two players running different networks in one match need their own value.
+    TimeEncoding::Mode timeEncoding = TimeEncoding::Mode::BINARY;
     
     // Convenience constructors
     static SearchOptions uci(int moveTimeMs, int multiPV = 1, int analysisBoard = 0) {

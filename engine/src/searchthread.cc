@@ -302,8 +302,9 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
         ctx.boardState = std::make_unique<Board>(board);  // Copy board state for later processing
         
         // Convert board to planes for this batch slot
-        board_to_planes(board, obs + validInferenceCount * NB_INPUT_VALUES(), 
-                        ctx.teamToPlay, ctx.sitPlaneActive);
+        board_to_planes(board, obs + validInferenceCount * NB_INPUT_VALUES(),
+                        ctx.teamToPlay,
+                        plane_margins(board, ctx.teamToPlay, ctx.sitPlaneActive, timeEncoding));
         validInferenceCount++;
         
         batchContexts.push_back(std::move(ctx));

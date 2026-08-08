@@ -141,7 +141,28 @@ inline void set_plane_castling_rights_board(PlaneData& p, int boardIdx) {
     }
 }
 
-void board_to_planes(Board& board, float* inputPlanes, Stockfish::Color teamSide, bool hasTimeAdvantage=false) {
+TimeEncoding::MarginPlanes plane_margins(const Board& board,
+                                         Stockfish::Color teamSide,
+                                         bool teamHasTimeAdvantage,
+                                         TimeEncoding::Mode mode) {
+    // No clock model: nothing to derive a margin from, so both planes carry the
+    // caller's team bit exactly as they did before Phase 2. This is also the
+    // path a clock-blind player takes, because set_clocks_visible(false) turns
+    // has_clocks() off without disturbing the clocks themselves.
+    if (!board.has_clocks()) {
+        const float bit = teamHasTimeAdvantage ? 1.0f : 0.0f;
+        return TimeEncoding::MarginPlanes{bit, bit};
+    }
+
+    const int team = (teamSide == Stockfish::WHITE) ? Board::WHITE_TEAM : Board::BLACK_TEAM;
+    return TimeEncoding::MarginPlanes{
+        TimeEncoding::encode_margin(board.sit_margin(team, 0), mode),
+        TimeEncoding::encode_margin(board.sit_margin(team, 1), mode)
+    };
+}
+
+void board_to_planes(Board& board, float* inputPlanes, Stockfish::Color teamSide,
+                     TimeEncoding::MarginPlanes margins) {
     // Initialize all to 0 using SIMD when available
     // NB_INPUT_VALUES = 64 * 8 * 8 = 4096 floats (exactly 512 AVX2 iterations)
     constexpr size_t totalFloats = 64 * 8 * 8;  // NB_INPUT_CHANNELS * BOARD_HEIGHT * BOARD_WIDTH
@@ -162,8 +183,8 @@ void board_to_planes(Board& board, float* inputPlanes, Stockfish::Color teamSide
     set_plane_ep_square_board(planeData, 0);        
     set_plane_color_info_board(planeData, 0);       
     planeData.set_plane_to_value(1.0f);             // Constant plane
-    set_plane_castling_rights_board(planeData, 0);  
-    planeData.set_plane_to_value(hasTimeAdvantage ? 1.0f : 0.0f); 
+    set_plane_castling_rights_board(planeData, 0);
+    planeData.set_plane_to_value(margins.a);        // Channel 31: board A sit margin
     
     // Process Board 1 (Channels 32-63)
     set_plane_pieces_board(planeData, 1);           
@@ -172,6 +193,6 @@ void board_to_planes(Board& board, float* inputPlanes, Stockfish::Color teamSide
     set_plane_ep_square_board(planeData, 1);        
     set_plane_color_info_board(planeData, 1);       
     planeData.set_plane_to_value(1.0f);             // Constant plane
-    set_plane_castling_rights_board(planeData, 1);  
-    planeData.set_plane_to_value(hasTimeAdvantage ? 1.0f : 0.0f);
+    set_plane_castling_rights_board(planeData, 1);
+    planeData.set_plane_to_value(margins.b);        // Channel 63: board B sit margin
 }

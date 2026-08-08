@@ -18,6 +18,7 @@
 #include "gamepgn.h"
 #include "gui_state_writer.h"
 #include "../board.h"
+#include "../time_encoding.h"
 #include "../agent.h"
 #include "../engine.h"
 
@@ -74,6 +75,14 @@ struct PlayerConfig {
     // Only meaningful when EvalSettings::initialTimeDcs > 0. With no clock
     // model there is nothing to be blind to and both arms are identical.
     bool clockAware = true;
+
+    // Which sit-margin encoding this player's network was trained on. Unlike
+    // every other field here this is not a knob to explore -- it is a fact
+    // about the .onnx, and getting it wrong feeds the network an input
+    // distribution it has never seen. Read unconditionally, not only under
+    // usePlayerConfigs, so `eval` can pit two differently-trained networks
+    // against each other.
+    TimeEncoding::Mode timeEncoding = TimeEncoding::Mode::BINARY;
 
     // Convenience methods
     bool hasCustomModel() const { return !modelPath.empty(); }

@@ -82,6 +82,12 @@ private:
     
     // Current batch size (initialized on first run_iteration call)
     int currentBatchSize = 0;
+
+    // Encoding this thread's network expects in channels 31 and 63. Set per
+    // search from SearchOptions, because in a two-network match the threads of
+    // one player must not encode the margin the way the other player's network
+    // was trained to read it.
+    TimeEncoding::Mode timeEncoding = TimeEncoding::Mode::BINARY;
     
     // Allocate/reallocate buffers for given batch size
     void ensureBufferSize(int batchSize);
@@ -96,6 +102,7 @@ public:
     void set_root_node(Node* node);
     void set_transposition_table(TranspositionTable* table);
     TranspositionTable* get_transposition_table();
+    void set_time_encoding(TimeEncoding::Mode mode) { timeEncoding = mode; }
     
     // MCGS (Monte Carlo Graph Search) with joint action progressive widening
     Node* select_and_expand(Board& board, bool teamHasTimeAdvantage);

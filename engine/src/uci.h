@@ -18,6 +18,9 @@ private:
     Board board;
     Stockfish::Color teamSide = Stockfish::WHITE;
     bool teamHasTimeAdvantage = false;
+    // Encoding the loaded network expects in channels 31 and 63; set with the
+    // TimeEncoding UCI option. Defaults to the deployed network's encoding.
+    TimeEncoding::Mode timeEncoding = TimeEncoding::Mode::BINARY;
     std::vector<std::unique_ptr<Engine>> engines;
     bool ongoingSearch = false;
     int multiPV = 1;  // Number of principal variations to display

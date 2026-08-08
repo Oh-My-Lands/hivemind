@@ -377,6 +377,12 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
             (isPlayer1Turn ? settings.player1.clockAware : settings.player2.clockAware);
         const bool hideClocks = board.has_clocks() && !searchSeesClocks;
 
+        // Unlike clockAware this is read whether or not usePlayerConfigs is on:
+        // in a classic `eval` the two players are different networks, which is
+        // exactly when their encodings can differ.
+        opts.timeEncoding = isPlayer1Turn ? settings.player1.timeEncoding
+                                          : settings.player2.timeEncoding;
+
         if (hideClocks) board.set_clocks_visible(false);
         JointActionCandidate bestAction = agent->run_search(
             board, *engines, currentSide, teamHasTimeAdvantage, opts);

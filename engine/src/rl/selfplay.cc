@@ -163,7 +163,13 @@ GameResult SelfPlay::generate_game(bool whiteHasTimeAdvantage, bool verbose) {
         }
         
         // Generate input planes BEFORE making the move (for training data)
-        board_to_planes(board, inputPlanes.data(), currentSide, teamHasTimeAdvantage);
+        // Self-play sets no clocks, so plane_margins takes the fallback path and
+        // both planes carry teamHasTimeAdvantage exactly as before. The mode is
+        // stated anyway so this call site does not silently change meaning if
+        // self-play ever gains a clock model.
+        board_to_planes(board, inputPlanes.data(), currentSide,
+                        plane_margins(board, currentSide, teamHasTimeAdvantage,
+                                      TimeEncoding::Mode::BINARY));
         
         // Use MCTS search with Agent for move selection
         Agent* agent = (currentSide == Stockfish::WHITE) ? agentWhiteTeam.get() : agentBlackTeam.get();

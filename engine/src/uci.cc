@@ -248,6 +248,22 @@ void UCI::setoption(std::istringstream& is) {
         } else if (value == "go") {
             teamHasTimeAdvantage = false;
         }
+    } else if (name == "TimeEncoding") {
+        // Must match the network loaded. A network trained on one encoding
+        // reads the other as garbage -- BINARY's 0/1 lands mid-range for a
+        // CONTINUOUS net, and CONTINUOUS's negatives are off the end of
+        // BINARY's. There is no way to detect the mismatch from the weights,
+        // so this is stated rather than inferred.
+        if (value == "binary") {
+            timeEncoding = TimeEncoding::Mode::BINARY;
+        } else if (value == "continuous") {
+            timeEncoding = TimeEncoding::Mode::CONTINUOUS;
+        } else {
+            std::cout << "info string TimeEncoding ignored: expected binary or continuous"
+                      << std::endl;
+            return;
+        }
+        std::cout << "info string TimeEncoding set to " << value << std::endl;
     } else if (name == "Clocks") {
         // "Clocks" takes four deciseconds: A-White A-Black B-White B-Black.
         // `value` above only captured the first token, so re-read the rest.
@@ -278,6 +294,7 @@ void UCI::send_uci_response() {
     cout << "option name AnalysisBoard type spin default 1 min 1 max 2" << endl;
     cout << "option name Team type combo default white var white var black" << endl;
     cout << "option name Mode type combo default go var sit var go" << endl;
+    cout << "option name TimeEncoding type combo default binary var binary var continuous" << endl;
     // Four deciseconds: A-White A-Black B-White B-Black. Unset means no clock
     // model, and the engine falls back to Mode's single global bit.
     cout << "option name Clocks type string default" << endl;
@@ -297,7 +314,8 @@ void UCI::policy() {
     float* piB = new float[SearchParams::BATCH_SIZE * NB_POLICY_VALUES()];
 
     // Convert board to planes
-    board_to_planes(board, obs, teamSide, teamHasTimeAdvantage);
+    board_to_planes(board, obs, teamSide,
+                    plane_margins(board, teamSide, teamHasTimeAdvantage, timeEncoding));
 
     // Run inference
     Engine* engine = engines[0].get();

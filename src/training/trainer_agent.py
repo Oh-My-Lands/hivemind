@@ -854,9 +854,26 @@ def export_to_onnx(model, batch_size: int, dummy_input: torch.Tensor, dir: Path,
 
     model = onnx.load(model_filepath)
     model_simp, check = simplify(model)
-    onnx.save(model_simp, model_filepath)
     if not check:
         raise Exception("Simplified ONNX model could not be validated")
+
+    # The simplifier constant-folds using a concrete test shape, and a symbolic
+    # batch dimension folds along with everything else. The heads survive
+    # because they reshape to a literal [-1, N], but the squeeze-excitation
+    # blocks take their batch from x.size(), so the symbol becomes a literal 1
+    # and the whole graph is pinned to batch 1. Nothing complains until
+    # TensorRT builds a batch-16 profile against it, which is on rented
+    # hardware, after training.
+    #
+    # Simplification is an optimisation, not a requirement -- TensorRT does its
+    # own constant folding -- so the unsimplified graph is the right thing to
+    # keep when the two disagree about this.
+    if dynamic_batch_size and not _has_dynamic_batch(model_simp):
+        logging.warning("onnxsim froze the dynamic batch dimension; keeping the "
+                        "unsimplified graph so the model stays batchable")
+        model_simp = model
+
+    onnx.save(model_simp, model_filepath)
 
     # The dynamo exporter writes weights to a sidecar <name>.data and onnx.save
     # then folds them back inline, leaving an orphan the same size as the model
@@ -881,6 +898,26 @@ def export_to_onnx(model, batch_size: int, dummy_input: torch.Tensor, dir: Path,
         for output in outputs_to_remove:
             graph.output.remove(output)
         onnx.save(model, model_filepath)
+
+    # Last word, after every step that rewrites the file. A model whose batch
+    # dimension is static loads, validates, and produces correct single-position
+    # outputs -- it only fails when the engine builds its batched profile, so
+    # nothing earlier in the pipeline can be relied on to notice.
+    if dynamic_batch_size and not _has_dynamic_batch(onnx.load(model_filepath)):
+        raise RuntimeError(
+            f"{model_filepath} was exported with dynamic_batch_size=True but its "
+            "batch dimension is static; the engine cannot batch it")
+
+
+def _has_dynamic_batch(model) -> bool:
+    """
+    Whether the model's first input dimension is symbolic rather than a fixed size.
+
+    :param model: Loaded ONNX model
+    :return: True when dimension 0 of the first graph input is a dim_param
+    """
+    dim = model.graph.input[0].type.tensor_type.shape.dim[0]
+    return dim.WhichOneof("value") == "dim_param"
 
 
 def export_as_script_module(model, batch_size, dummy_input, dir) -> None:

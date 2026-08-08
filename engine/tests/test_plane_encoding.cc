@@ -109,18 +109,44 @@ TEST_F(PlaneEncodingTest, ClockDerivedMarginOverridesTheFallbackBit) {
     EXPECT_FLOAT_EQ(plane_value(withBitSet, CH_B), plane_value(withBitClear, CH_B));
 }
 
-// Perspective. The same position seen by the other team must negate both
-// margins -- this is what previously required an explicit negation at the call
-// site and is now a property of deriving from teamSide.
-TEST_F(PlaneEncodingTest, TheOpposingTeamSeesNegatedMargins) {
+// Perspective, and the way it differs from the bit this replaced.
+//
+// The old team bit was antisymmetric by construction: one team was up, so the
+// other was down. A per-board margin is not, because each team's member on a
+// board races the player of *their own colour* on the other board -- the two
+// teams are comparing two different pairs of clocks, and the answers are
+// independent. Board A being slow for both colours makes both teams' board-A
+// member the one who can afford to sit.
+//
+// Asserting the old antisymmetry here would fail, and the failure would be the
+// test being wrong rather than the encoding.
+TEST_F(PlaneEncodingTest, BothTeamsCanLeadOnTheSameBoard) {
     Board b = fresh();
-    b.set_clocks(1800, 1800, 1000, 1000);
+    b.set_clocks(/*aWhite=*/1800, /*aBlack=*/1800, /*bWhite=*/1000, /*bBlack=*/1000);
+
+    auto white = fill(b, Stockfish::WHITE, false, TimeEncoding::Mode::CONTINUOUS);
+    auto black = fill(b, Stockfish::BLACK, false, TimeEncoding::Mode::CONTINUOUS);
+
+    EXPECT_GT(plane_value(white, CH_A), 0.0f);
+    EXPECT_GT(plane_value(black, CH_A), 0.0f);
+    EXPECT_LT(plane_value(white, CH_B), 0.0f);
+    EXPECT_LT(plane_value(black, CH_B), 0.0f);
+}
+
+// Where the margins *are* mirror images: one colour ahead on both boards. Then
+// each team's members lead exactly where the other team's trail, and the planes
+// negate. This is the case the old team bit could represent.
+TEST_F(PlaneEncodingTest, MarginsNegateWhenOneColourLeadsOnBothBoards) {
+    Board b = fresh();
+    // White leads on board A, Black leads on board B, by the same amount.
+    b.set_clocks(/*aWhite=*/1800, /*aBlack=*/1000, /*bWhite=*/1000, /*bBlack=*/1800);
 
     auto white = fill(b, Stockfish::WHITE, false, TimeEncoding::Mode::CONTINUOUS);
     auto black = fill(b, Stockfish::BLACK, false, TimeEncoding::Mode::CONTINUOUS);
 
     EXPECT_NEAR(plane_value(white, CH_A), -plane_value(black, CH_A), 1e-6f);
     EXPECT_NEAR(plane_value(white, CH_B), -plane_value(black, CH_B), 1e-6f);
+    EXPECT_GT(plane_value(white, CH_A), 0.0f);
 }
 
 // The two modes agree on sign everywhere. This is the invariant that keeps the

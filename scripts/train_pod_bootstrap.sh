@@ -31,9 +31,15 @@ print('torch  ', torch.__version__); print('gpu    ', torch.cuda.get_device_name
 # The export bug this branch fixed only shows up at the first checkpoint, which
 # is an hour in. Prove the exporter works against a random-init net first --
 # it needs no trained weights, so it costs seconds rather than an hour.
+#
+# "A file appeared" is not the check. The first version of this preflight
+# passed on a model whose batch dimension onnxsim had frozen to 1, which loads
+# and validates and gives correct single-position answers, and which the engine
+# then cannot build a batched TensorRT profile against -- discovered after both
+# arms had been trained and paid for. So the shape is asserted, not the file.
 echo "=== onnx export smoke test ==="
 python - <<'PY'
-import tempfile, torch
+import tempfile, torch, onnx
 from pathlib import Path
 from src.training.train_loop import get_model_args
 from src.architectures.rise_mobile_v3 import get_rise_v33_model
@@ -42,8 +48,15 @@ with tempfile.TemporaryDirectory() as d:
     export_to_onnx(get_rise_v33_model(get_model_args()), 1,
                    torch.zeros(1, 64, 8, 8), Path(d), "preflight", False, True)
     produced = sorted(p.name for p in Path(d).iterdir())
-    assert any(p.endswith(".onnx") for p in produced), produced
-    print("onnx export OK:", produced)
+    onnx_files = [p for p in produced if p.endswith(".onnx")]
+    assert onnx_files, produced
+
+    model = onnx.load(str(Path(d) / onnx_files[0]))
+    shape = model.graph.input[0].type.tensor_type.shape.dim
+    dims = [d_.dim_param or d_.dim_value for d_ in shape]
+    assert shape[0].WhichOneof("value") == "dim_param", \
+        f"batch dimension is static {dims}; the engine cannot batch this model"
+    print("onnx export OK:", onnx_files[0], dims)
 PY
 
 for arm in "${ARMS[@]}"; do

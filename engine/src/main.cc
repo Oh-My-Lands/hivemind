@@ -66,6 +66,9 @@ void printUsage(const char* progName) {
     cout << "                     --time-control <ds> enables the clock model (0 = off)" << endl;
     cout << "    --model <path>   Path to model ONNX file" << endl;
     cout << "    --games <n>      Number of games to play (default: 100)" << endl;
+    cout << "    --encoding <m>   Sit-margin encoding the model was trained on:" << endl;
+    cout << "                     binary or continuous (default: binary). One model" << endl;
+    cout << "                     plays both sides, so this applies to both." << endl;
     cout << "    --verbose        Print each game result" << endl;
     cout << "    --pgn <path>     Save games to PGN file" << endl;
     cout << "    --gui            Enable web GUI for live viewing" << endl;
@@ -84,6 +87,9 @@ void printUsage(const char* progName) {
     cout << "    --pX-tt <0|1>    Enable transpositions (default: 1)" << endl;
     cout << "    --pX-qweight <f> Q-value weight (default: 1.0)" << endl;
     cout << "    --pX-qveto <f>   Q-value veto delta (default: 0.4)" << endl;
+    cout << "    --pX-clocks <0|1> Whether this player's search sees the clocks" << endl;
+    cout << "                     (default: 1). Set one side to 0 with --time-control" << endl;
+    cout << "                     for the Phase 4 A/B." << endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -293,6 +299,18 @@ int main(int argc, char* argv[]) {
                 // model: sitting is free and nothing can end on time, which is
                 // the baseline arm to measure the clock-aware engine against.
                 settings.initialTimeDcs = stoi(argv[++i]);
+            } else if (arg == "--encoding" && i + 1 < argc) {
+                // One model plays both sides here, so the encoding is a single
+                // fact about that .onnx rather than a per-player knob. Without
+                // this the default would silently present a continuous-trained
+                // net with the binary planes it has never seen -- an A/B that
+                // completes and reports a plausible Elo for the wrong reason.
+                TimeEncoding::Mode mode;
+                if (!parse_time_encoding(argv[++i], mode)) {
+                    return EXIT_FAILURE;
+                }
+                settings.player1.timeEncoding = mode;
+                settings.player2.timeEncoding = mode;
             }
             // Player 1 settings
             else if (arg == "--p1-nodes" && i + 1 < argc) {
@@ -385,7 +403,19 @@ int main(int argc, char* argv[]) {
             }
             cout << "Using model: " << modelPath << endl;
         }
-        
+
+        // Same discipline as `eval`: the encoding and the clock arms are the
+        // whole experiment, so state them in the output that gets pasted into
+        // the writeup rather than trusting the invocation to be remembered.
+        cout << "  Model encoding: "
+             << (settings.player1.timeEncoding == TimeEncoding::Mode::CONTINUOUS
+                     ? "continuous" : "binary") << endl;
+        cout << "  Time control: " << settings.initialTimeDcs << " ds"
+             << (settings.initialTimeDcs == 0 ? "  (no clock model -- both arms identical)" : "")
+             << endl;
+        cout << "  Search sees clocks: P1 " << (settings.player1.clockAware ? "yes" : "no")
+             << ", P2 " << (settings.player2.clockAware ? "yes" : "no") << endl;
+
         run_param_eval(modelPath, settings);
         
         return EXIT_SUCCESS;

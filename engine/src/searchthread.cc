@@ -297,7 +297,11 @@ void SearchThread::run_iteration(Board& board, Engine* engine, bool teamHasTimeA
         
         // This leaf needs neural network inference
         ctx.isTerminal = false;
-        ctx.leafHash = board.hash_key(teamHasTimeAdvantage);  // Store hash for MCGS transposition lookup
+        // Keyed on the team to play at this leaf, matching the child-registration
+        // site below and the root in agent.cc.
+        ctx.leafHash = board.search_hash_key(
+            ctx.teamToPlay == Stockfish::WHITE ? Board::WHITE_TEAM : Board::BLACK_TEAM,
+            teamHasTimeAdvantage);  // Store hash for MCGS transposition lookup
         
         ctx.boardState = std::make_unique<Board>(board);  // Copy board state for later processing
         
@@ -497,7 +501,12 @@ Node* SearchThread::select_and_expand(Board& board, bool teamHasTimeAdvantage) {
                 board.make_moves(expandedAction.moveA, expandedAction.moveB, actingTeam);
                 
                 // MCGS: Compute position hash and register in transposition table
-                uint64_t childHash = board.hash_key(teamHasTimeAdvantage);
+                // The child's own team to play, not the parent's: make_moves has
+                // already advanced the position, and Node is constructed with
+                // ~teamToPlay, so this is the value the leaf site will use when
+                // it probes for the same position.
+                uint64_t childHash =
+                    board.search_hash_key(acting_team_of(nextNode.get()), teamHasTimeAdvantage);
                 nextNode->set_hash(childHash);
                 
                 // Register in transposition table (for stats tracking, if MCGS enabled)

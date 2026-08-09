@@ -86,6 +86,28 @@ class Board {
         }
 
         /**
+        * @brief The key the search must use for transposition lookups.
+        *
+        * With a clock model in play the search reads sit permission from this
+        * node's clocks (searchthread.cc), so nodes that differ only in clock
+        * state have different legal moves and different terminal conditions.
+        * Keying them the same makes MCGS merge their statistics into one Node.
+        * That is the situation hash_key_with_clocks exists to prevent, and it
+        * went unenforced because nothing outside the tests ever called it.
+        *
+        * Without clocks this is the old key byte for byte, so a clock-blind
+        * search is unchanged and the A/B against it stays comparable.
+        *
+        * @param actingTeam Team to play at this node, WHITE_TEAM / BLACK_TEAM.
+        * @param teamHasTimeAdvantage The pre-clock global bit, used only in the
+        *        no-clock fallback.
+        */
+        unsigned long search_hash_key(int actingTeam, bool teamHasTimeAdvantage) {
+            return has_clocks() ? hash_key_with_clocks(actingTeam)
+                                : hash_key(teamHasTimeAdvantage);
+        }
+
+        /**
          * @brief Computes a hash key for a single board ignoring pocket pieces.
          * Used for 3-fold repetition detection where only board position matters.
          * @param board_num The board index.

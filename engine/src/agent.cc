@@ -307,8 +307,15 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
     int moveTimeMs = options.moveTimeMs;
     size_t targetNodes = options.targetNodes;
 
+    // The root's team to play, in Board's team encoding. The root Node is built
+    // with teamSide below, so this matches what acting_team_of() reports for
+    // every node in the tree -- the two must agree or insert and lookup key
+    // the same position differently.
+    const int rootActingTeam =
+        teamSide == Stockfish::WHITE ? Board::WHITE_TEAM : Board::BLACK_TEAM;
+
     // Compute position hash for tree reuse
-    uint64_t positionHash = board.hash_key(teamHasTimeAdvantage);
+    uint64_t positionHash = board.search_hash_key(rootActingTeam, teamHasTimeAdvantage);
     
     // Try to reuse tree from previous search (if enabled)
     std::shared_ptr<Node> reusedRoot = nullptr;
@@ -335,7 +342,7 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
     // MCGS: Clear and set up transposition table for new search (if enabled)
     if (SearchParams::ENABLE_MCGS && transpositionTable) {
         transpositionTable->clear();
-        transpositionTable->insertOrGet(board.hash_key(teamHasTimeAdvantage), rootNode);
+        transpositionTable->insertOrGet(board.search_hash_key(rootActingTeam, teamHasTimeAdvantage), rootNode);
     }
 
     // Set up all search threads with shared root node, search info, and transposition table
@@ -669,7 +676,7 @@ JointActionCandidate Agent::run_search(Board& board, const vector<Engine*>& engi
     // Store next-root candidates for tree reuse
     if (SearchParams::ENABLE_TREE_REUSE) {
         store_next_root_candidates();
-        lastSearchHash_ = board.hash_key(teamHasTimeAdvantage);
+        lastSearchHash_ = board.search_hash_key(rootActingTeam, teamHasTimeAdvantage);
     }
     
     // Output UCI info if verbose

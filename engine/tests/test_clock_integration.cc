@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
 #include "../src/board.h"
+#include "../src/uci.h"
 #include "../src/constants.h"
 #include "../src/time_control.h"
+#include <sstream>
+#include <string>
 #include <vector>
 #include "Fairy-Stockfish/src/bitboard.h"
 #include "Fairy-Stockfish/src/piece.h"
@@ -289,4 +292,69 @@ TEST_F(ClockTest, HidingClocksRestoresThePreClockSitRules) {
     // has_clocks() first, so a blinded search never reaches it and falls back
     // to the fixed team bit instead.
     EXPECT_FALSE(b.has_clocks());
+}
+
+// The `Clocks` UCI option's own parsing.
+//
+// The Board semantics above are what matter, but they are reached through a
+// string, and that string handling is the part of the clock model with no other
+// coverage. It is also the only part a serving deployment exercises on every
+// request. Kept here rather than in a UCI test file because what it is really
+// asserting is which Board call each spelling lands on.
+//
+// UCI::setoption is observed through its `info string` rather than the Board it
+// mutates, which is private. That is enough to pin the branch taken, which is
+// the thing that was wrong to get wrong: `off` reaching the four-integer parser
+// would read as atoi("off") == 0 and set every clock to zero -- a flagged
+// position, i.e. a confident evaluation of a game that has already ended.
+//
+// UCI() is a trivial constructor and the engines vector stays empty, so none of
+// this needs a GPU.
+class ClocksOptionTest : public ::testing::Test {
+protected:
+    static void SetUpTestSuite() {
+        Stockfish::pieceMap.init();
+        Stockfish::variants.init();
+        Stockfish::Bitboards::init();
+        Stockfish::Position::init();
+        Stockfish::Threads.set(1);
+        init_policy_index();
+    }
+
+    // Runs one `setoption` body and returns what the engine reported.
+    static std::string say(const std::string& args) {
+        UCI uci;
+        std::istringstream is(args);
+        std::ostringstream captured;
+        std::streambuf* saved = std::cout.rdbuf(captured.rdbuf());
+        uci.setoption(is);
+        std::cout.rdbuf(saved);
+        return captured.str();
+    }
+};
+
+TEST_F(ClocksOptionTest, FourIntegersAreAccepted) {
+    const std::string out = say("name Clocks value 1200 1180 1190 1205");
+    EXPECT_NE(out.find("Clocks set to 1200 1180 1190 1205"), std::string::npos)
+        << "got: " << out;
+}
+
+TEST_F(ClocksOptionTest, OffLeavesTheClockModel) {
+    const std::string out = say("name Clocks value off");
+    EXPECT_NE(out.find("Clocks off"), std::string::npos) << "got: " << out;
+    // Must not have fallen through to the integer parser, which would have
+    // read "off" as 0 and set a flagged clock rather than disabling the model.
+    EXPECT_EQ(out.find("Clocks set to"), std::string::npos) << "got: " << out;
+}
+
+TEST_F(ClocksOptionTest, ShortQuartetIsRefusedRatherThanPadded) {
+    const std::string out = say("name Clocks value 100 200");
+    EXPECT_NE(out.find("Clocks ignored"), std::string::npos) << "got: " << out;
+    EXPECT_EQ(out.find("Clocks set to"), std::string::npos) << "got: " << out;
+}
+
+TEST_F(ClocksOptionTest, NonNumericIsRefused) {
+    const std::string out = say("name Clocks value garbage");
+    EXPECT_NE(out.find("Clocks ignored"), std::string::npos) << "got: " << out;
+    EXPECT_EQ(out.find("Clocks set to"), std::string::npos) << "got: " << out;
 }

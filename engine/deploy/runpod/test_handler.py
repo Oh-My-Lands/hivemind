@@ -163,6 +163,76 @@ class TestSearchTimeout:
         assert handler_module.search_timeout_seconds(movetime=1_000, nodes=4_000_000) == 31
 
 
+class TestParseClocks:
+    """
+    The `clocks` quartet's validation.
+
+    This is the only input the engine reads *semantically* rather than
+    structurally: sit permission and flag-terminality come off these four
+    numbers, so a quartet that is silently truncated, reordered, or coerced
+    produces a confident evaluation of a position nobody is in. Every case here
+    must fall back to Mode and say so, never guess.
+    """
+
+    @staticmethod
+    def parse(raw):
+        # Imported here rather than at module scope, matching TestSearchTimeout:
+        # handler.py reaches for the runpod SDK, which is absent locally.
+        import handler as handler_module
+
+        return handler_module._parse_clocks(raw)
+
+    def test_four_deciseconds_pass_through(self):
+        assert self.parse([1200, 1180, 1190, 1205]) == [1200, 1180, 1190, 1205]
+
+    def test_a_tuple_is_accepted(self):
+        assert self.parse((1, 2, 3, 4)) == [1, 2, 3, 4]
+
+    def test_a_dict_is_read_in_engine_order(self):
+        # A-White A-Black B-White B-Black, which is the Clocks option's order
+        # and not the order the keys happen to appear in.
+        got = self.parse(
+            {"bBlack": 4, "aWhite": 1, "bWhite": 3, "aBlack": 2}
+        )
+        assert got == [1, 2, 3, 4]
+
+    def test_a_dict_missing_a_key_is_refused(self):
+        assert self.parse({"aWhite": 1, "aBlack": 2, "bWhite": 3}) is None
+
+    def test_absent_means_no_clock_model(self):
+        assert self.parse(None) is None
+
+    def test_a_short_quartet_is_refused_rather_than_padded(self):
+        assert self.parse([1, 2, 3]) is None
+
+    def test_a_long_quartet_is_refused_rather_than_truncated(self):
+        assert self.parse([1, 2, 3, 4, 5]) is None
+
+    def test_true_is_refused_rather_than_read_as_one_decisecond(self):
+        # bool subclasses int, so a caller still sending the old boolean mode
+        # would otherwise land on a 1-decisecond clock -- a flagged position.
+        assert self.parse([True, 1180, 1190, 1205]) is None
+
+    def test_a_negative_clock_is_refused(self):
+        assert self.parse([1200, -1, 1190, 1205]) is None
+
+    def test_a_non_numeric_entry_is_refused(self):
+        assert self.parse([1200, "1180", 1190, 1205]) is None
+
+    def test_a_bare_scalar_is_refused(self):
+        assert self.parse(1200) is None
+
+    def test_zero_is_a_flagged_clock_not_a_missing_one(self):
+        # Zero is legal input: a flagged clock is a real position the engine
+        # must be able to evaluate, and is not the same as "no clocks given".
+        assert self.parse([0, 1180, 1190, 1205]) == [0, 1180, 1190, 1205]
+
+    def test_floats_are_truncated_to_deciseconds(self):
+        # Documents the coercion that does happen: JSON has no int/float
+        # distinction, so a float is taken rather than refused, and truncated.
+        assert self.parse([119.7, 1180, 1190, 1205]) == [119, 1180, 1190, 1205]
+
+
 class TestVerifyReady:
     """
     The engine answers `uciok` before it knows whether any GPU engine loaded,

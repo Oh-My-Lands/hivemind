@@ -37,6 +37,32 @@ static bool parse_time_encoding(const string& value, TimeEncoding::Mode& out) {
     return false;
 }
 
+static bool parse_alloc_mode(const string& value, TimeAlloc::Mode& out) {
+    if (value == "fixed") {
+        out = TimeAlloc::Mode::FIXED;
+        return true;
+    }
+    if (value == "flat") {
+        out = TimeAlloc::Mode::FLAT;
+        return true;
+    }
+    if (value == "arc") {
+        out = TimeAlloc::Mode::ARC;
+        return true;
+    }
+    cerr << "Error: unknown allocation mode '" << value
+         << "' (expected fixed, flat or arc)" << endl;
+    return false;
+}
+
+static const char* alloc_mode_name(TimeAlloc::Mode mode) {
+    switch (mode) {
+        case TimeAlloc::Mode::FLAT: return "flat";
+        case TimeAlloc::Mode::ARC:  return "arc";
+        default:                    return "fixed";
+    }
+}
+
 void printUsage(const char* progName) {
     cout << "Usage: " << progName << " [options]" << endl;
     cout << "Options:" << endl;
@@ -250,6 +276,19 @@ int main(int argc, char* argv[]) {
                     return EXIT_FAILURE;
                 }
             }
+            // Both default to 1.0. Exposed here so a rerun of a pre-2026-08-10
+            // gate can reproduce the 0.5/1.5 handicap it was actually measured
+            // under, and so a script asking for 1.0 fails loudly on an old
+            // binary instead of being silently ignored.
+            else if (arg == "--new-attacker-mult" && i + 1 < argc) {
+                settings.player1.attackerNodeMultiplier = stof(argv[++i]);
+            } else if (arg == "--new-defender-mult" && i + 1 < argc) {
+                settings.player1.defenderNodeMultiplier = stof(argv[++i]);
+            } else if (arg == "--old-attacker-mult" && i + 1 < argc) {
+                settings.player2.attackerNodeMultiplier = stof(argv[++i]);
+            } else if (arg == "--old-defender-mult" && i + 1 < argc) {
+                settings.player2.defenderNodeMultiplier = stof(argv[++i]);
+            }
         }
 
         // Validate model paths
@@ -271,6 +310,10 @@ int main(int argc, char* argv[]) {
         cout << "  Time control: " << settings.initialTimeDcs << " ds"
              << (settings.initialTimeDcs == 0 ? "  (no clock model -- the margin planes are constant)" : "")
              << endl;
+        cout << "  Node multipliers: new att " << settings.player1.attackerNodeMultiplier
+             << " / def " << settings.player1.defenderNodeMultiplier
+             << ", old att " << settings.player2.attackerNodeMultiplier
+             << " / def " << settings.player2.defenderNodeMultiplier << endl;
 
         run_model_eval(newModelPath, oldModelPath, settings);
         
@@ -346,6 +389,17 @@ int main(int argc, char* argv[]) {
                 // --time-control to get the Phase 4 A/B: same net, same world,
                 // one side able to reason about the clock and one not.
                 settings.player1.clockAware = (stoi(argv[++i]) != 0);
+            } else if (arg == "--p1-attacker-mult" && i + 1 < argc) {
+                settings.player1.attackerNodeMultiplier = stof(argv[++i]);
+            } else if (arg == "--p1-defender-mult" && i + 1 < argc) {
+                settings.player1.defenderNodeMultiplier = stof(argv[++i]);
+            } else if (arg == "--p1-alloc" && i + 1 < argc) {
+                // fixed = constant --p1-nodes and the flat model cost, i.e. every
+                // benchmark before this flag existed. flat/arc spend the clock in
+                // nodes and make --p1-nodes dead.
+                if (!parse_alloc_mode(argv[++i], settings.player1.allocation)) {
+                    return EXIT_FAILURE;
+                }
             }
             // Player 2 settings
             else if (arg == "--p2-nodes" && i + 1 < argc) {
@@ -378,9 +432,21 @@ int main(int argc, char* argv[]) {
                 settings.player2.qVetoDelta = stof(argv[++i]);
             } else if (arg == "--p2-clocks" && i + 1 < argc) {
                 settings.player2.clockAware = (stoi(argv[++i]) != 0);
+            } else if (arg == "--p2-attacker-mult" && i + 1 < argc) {
+                settings.player2.attackerNodeMultiplier = stof(argv[++i]);
+            } else if (arg == "--p2-defender-mult" && i + 1 < argc) {
+                settings.player2.defenderNodeMultiplier = stof(argv[++i]);
+            } else if (arg == "--p2-alloc" && i + 1 < argc) {
+                if (!parse_alloc_mode(argv[++i], settings.player2.allocation)) {
+                    return EXIT_FAILURE;
+                }
             }
             // Common settings
-            else if (arg == "--verbose" || arg == "-v") {
+            else if (arg == "--alloc-k" && i + 1 < argc) {
+                // Nodes per decisecond. The currency of the game rather than a
+                // player's policy, so it is deliberately not a per-player knob.
+                settings.nodesPerDecisecond = stoi(argv[++i]);
+            } else if (arg == "--verbose" || arg == "-v") {
                 settings.verbose = true;
             } else if (arg == "--pgn" && i + 1 < argc) {
                 settings.outputPgnPath = argv[++i];
@@ -415,6 +481,31 @@ int main(int argc, char* argv[]) {
              << endl;
         cout << "  Search sees clocks: P1 " << (settings.player1.clockAware ? "yes" : "no")
              << ", P2 " << (settings.player2.clockAware ? "yes" : "no") << endl;
+        cout << "  Allocation: P1 " << alloc_mode_name(settings.player1.allocation)
+             << ", P2 " << alloc_mode_name(settings.player2.allocation)
+             << "  (k = " << settings.nodesPerDecisecond << " nodes/ds)" << endl;
+        // 1.0/1.0 means the configured node budget is the budget actually
+        // searched. Anything else is a handicap and belongs in the writeup.
+        cout << "  Node multipliers: P1 att " << settings.player1.attackerNodeMultiplier
+             << " / def " << settings.player1.defenderNodeMultiplier
+             << ", P2 att " << settings.player2.attackerNodeMultiplier
+             << " / def " << settings.player2.defenderNodeMultiplier << endl;
+
+        // An allocation mode with no clock has no bank to spend and silently
+        // degrades to FIXED -- a run that completes and reports a plausible Elo
+        // for an arm that was never actually tested. Refuse instead.
+        const bool wantsAllocation =
+            settings.player1.allocation != TimeAlloc::Mode::FIXED ||
+            settings.player2.allocation != TimeAlloc::Mode::FIXED;
+        if (wantsAllocation && settings.initialTimeDcs <= 0) {
+            cerr << "Error: --p1-alloc/--p2-alloc need a clock; pass --time-control <dcs>"
+                 << endl;
+            return EXIT_FAILURE;
+        }
+        if (settings.nodesPerDecisecond <= 0) {
+            cerr << "Error: --alloc-k must be positive" << endl;
+            return EXIT_FAILURE;
+        }
 
         run_param_eval(modelPath, settings);
         

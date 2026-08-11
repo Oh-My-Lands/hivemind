@@ -18,6 +18,7 @@
 #include "gamepgn.h"
 #include "gui_state_writer.h"
 #include "../board.h"
+#include "../time_alloc.h"
 #include "../time_encoding.h"
 #include "../agent.h"
 #include "../engine.h"
@@ -83,6 +84,32 @@ struct PlayerConfig {
     // usePlayerConfigs, so `eval` can pit two differently-trained networks
     // against each other.
     TimeEncoding::Mode timeEncoding = TimeEncoding::Mode::BINARY;
+
+    // How this player turns a clock into a node budget. FIXED keeps nodesPerMove
+    // and the flat model cost, which is what every run before 2026-08-10 did and
+    // what the other modes are measured against. FLAT and ARC spend the clock in
+    // nodes at EvalSettings::nodesPerDecisecond and ignore nodesPerMove entirely.
+    //
+    // Only meaningful when EvalSettings::initialTimeDcs > 0 -- with no clock
+    // there is no bank to allocate from, and the mode falls back to FIXED.
+    TimeAlloc::Mode allocation = TimeAlloc::Mode::FIXED;
+
+    // Node budget scaled by which side of the time-advantage bool this player is
+    // on when it moves. Inherited from asymmetric self-play (rl_settings.h),
+    // where it is a curriculum device: handicapping whichever team is winning
+    // keeps generated games competitive and the training data informative.
+    //
+    // That reasoning does not survive the move into evaluation, whose whole job
+    // is to measure strength fairly, so both default to 1.0 -- the same default
+    // selfplay uses. Until 2026-08-10 they were hardcoded 0.5/1.5 here with no
+    // way to turn them off, which is why `--p1-nodes 800` has never meant 800.
+    //
+    // Set them back to 0.5/1.5 to reproduce a pre-2026-08-10 run.
+    //
+    // Read whether or not usePlayerConfigs is on, like timeEncoding: a classic
+    // `eval` was scaled by them too and should not silently keep being.
+    float attackerNodeMultiplier = 1.0f;   // player is up on time
+    float defenderNodeMultiplier = 1.0f;   // player is down on time
 
     // Convenience methods
     bool hasCustomModel() const { return !modelPath.empty(); }
@@ -163,6 +190,13 @@ struct EvalSettings {
     // model, which is the pre-existing behaviour: sitting is free and no game
     // can end on time. That is the baseline arm to measure against.
     int initialTimeDcs = 0;
+
+    // Exchange rate for the FLAT and ARC allocation modes: nodes bought by one
+    // decisecond of clock. Shared by both players on purpose -- it defines the
+    // currency of the game, not a player's policy, and two players trading at
+    // different rates would not be playing the same game.
+    int nodesPerDecisecond = TimeAlloc::NODES_PER_DECISECOND;
+
     size_t openingMovesToTrack = 4;  // Number of opening moves to track
     bool verbose = false;            // Print each game result
     std::string outputPgnPath = ""; // Optional: save games to PGN file

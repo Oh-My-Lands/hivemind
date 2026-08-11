@@ -5,6 +5,35 @@ How to measure whether making the search clock-aware makes the engine stronger.
 Written 2026-08-03, from the first run of it. Reusable for any change that
 alters *how the search reasons about time* while leaving the network alone.
 
+> ### ⚠️ Read before reusing any number in this file. *(2026-08-10)*
+>
+> Every result recorded here was measured with `ATTACKER_NODE_MULT = 0.5` /
+> `DEFENDER_NODE_MULT = 1.5` hardcoded in `ModelEvaluator::playGame`, so the
+> configured node budget was never the budget searched. With clocks on the
+> multiplier keys off `team_may_sit(currentTeam)` read live, which made it a
+> feedback loop: the clock-aware arm halved its own search whenever it won the
+> time race.
+>
+> Pinning both to 1.0 turned the headline **−25 into +93 Elo** (1200 games,
+> 751W/11D/438L, `.logs/multfix-20260810/`). The flag battle was unchanged
+> (~2.7:1 for clock-awareness either way); board play inverted, 411−584 →
+> 624−391 checkmates. **The "wins the clock, loses the board" conclusion this
+> document reports was an artifact of the harness.**
+>
+> The multipliers now default to 1.0 and are printed in every run header. The
+> *method* described below is still sound — one net, two search configs, one
+> clocked world — but the measured tables (Elo, ply counts, flag rates) all
+> predate the fix and need re-measuring before reuse.
+>
+> **This also withdraws the conclusion this file hands downstream.** The closing
+> recommendation — that clock-aware search is "a regression until the network is
+> retrained to match" — is dead twice over: there is no regression to explain, and
+> the retraining was subsequently done and *lost* (`PHASE2_GATE.md`: continuous
+> margin encoding, −81 Elo, worse on the board **and** on the clock). Net position
+> after both corrections: clock-aware **search** is worth about +93 Elo at 800
+> nodes; a continuous clock **encoding** in the network is not worth keeping. See
+> "That conclusion is retracted, twice over" under Results.
+
 ---
 
 ## What it measures
@@ -142,9 +171,15 @@ Read it as two separate matches:
 - **on the board** — 134-197, clock-aware wins 40.5%
 
 That is a completely different story from "−26 Elo". The clock model works; it
-converts clock awareness into flag wins. It also degrades ordinary board play,
-and because flags are only ~12.5% of games the board deficit dominates: +20
-games gained on the clock, −63 lost on the board.
+converts clock awareness into flag wins.
+
+> The numbers in this worked example are from the pre-fix harness, and the second
+> half of the original reading — "it also degrades ordinary board play, and the
+> board deficit dominates" — is **retracted**; the board deficit was the node
+> handicap. Keep the *method*, which is the point of the section and which held up:
+> splitting by termination is what made the aggregate interpretable, and it is
+> what later showed the flag result surviving the fix while the board result
+> inverted. Read the technique here, not the conclusion.
 
 Significance for a split of size `n`: `SE = sqrt(0.25/n)` in win rate. The 48
 flag games give ±7.2%, so 70.8% is ~2.9σ; the 331 board games give ±2.75%, so
@@ -170,10 +205,24 @@ stays clock-derived even for the blind player, because it also feeds
 So the baseline is "cannot reason about the clock", not "knows nothing about
 it".
 
-**Node allocation moves with the clock.** The attacker/defender split
-(0.5×/1.5× nodes, `ATTACKER_NODE_MULT`) keys off `teamHasTimeAdvantage`, which
-is clock-derived for *both* players — so it is symmetric and does not favour
-an arm, but it does mean node budget varies within a game.
+**Node allocation moved with the clock, and this caveat used to say it was
+harmless. It was not.** *(corrected 2026-08-10)* The attacker/defender split
+(0.5×/1.5× nodes, `ATTACKER_NODE_MULT`) keyed off `teamHasTimeAdvantage`, and the
+original text argued that because the bool is clock-derived for *both* players
+the handicap is symmetric and cannot favour an arm. That reasoning is wrong, and
+it is worth understanding why, because the error is subtle and cost two results.
+
+The multiplier is symmetric in *role* — attacker vs defender — but the roles are
+not assigned at random. They are assigned by who is winning the clock, which is
+precisely what the treatment under test changes. An arm that succeeds at
+acquiring a time advantage thereby moves itself onto the 0.5× side and its
+opponent onto the 1.5× side. Symmetry in the rule does not survive a treatment
+that predicts which side of the rule you land on: the handicap becomes a function
+of the independent variable, applied with a 3× lever.
+
+Both multipliers now default to 1.0. If you are reading a `param-eval` or `eval`
+log from before 2026-08-10, it does not record them and the budget it searched
+cannot be recovered.
 
 **Fixed nodes is not determinism.** `nodes` pins the work but `visits` and
 `bestmove` still vary run to run. Do not expect two runs to match; that is why
@@ -229,6 +278,32 @@ play.
 
 If that is right, this change is a **regression until the network is retrained
 to match**, and the fix is on the evaluator side, not the search side.
+
+### That conclusion is retracted, twice over *(2026-08-10)*
+
+It rested on a board-play deficit that does not exist, and the remedy it proposed
+was then tested directly and made things worse. Both halves failed independently:
+
+**The thing it set out to explain was an artifact.** There was no board-play
+degradation to attribute to distribution shift. Pinning the node multipliers to
+1.0 inverts the board split (411−584 → 624−391 checkmates) and the headline
+(−25 → +93 Elo). Clock-aware search is a *gain* of about 93 Elo at 800 nodes, and
+the explanation above is an explanation of a measurement error.
+
+**The proposed fix was tried and failed on its own terms.** `PHASE2_GATE.md` is
+that retraining: two nets on one corpus differing only in whether channels 31/63
+carry the binary sign bit or `tanh(margin / 50 ds)`. If distribution shift were
+the story, the continuous arm should have recovered board play. Measured at equal
+nodes it **loses on the board** — 39.6% of 2257 checkmates, −74 Elo there and −81
+overall — and it also loses the flag battle 108−28, the one class of game the
+finer margin most directly governs. So "retrain the network to match" is not a
+pending fix; it is a closed negative result.
+
+What survives is narrower and worth stating plainly: clock-aware **search** helps,
+and a continuous clock **encoding** in the network does not. Those are independent
+claims about different components, and the harness bug had inverted the sign of
+both. Do not cite this section's distribution-shift argument as motivation for
+further encoding work without reading the Phase 2 result first.
 
 ---
 
@@ -316,3 +391,11 @@ Rerun before acting on the "regression until the network is retrained"
 conclusion. The distribution-shift explanation is about the value head and is
 probably unaffected, but the decomposition is what this benchmark exists to
 report, and it has not been measured against the current search.
+
+**Resolved 2026-08-10, and the guess above was wrong.** It was rerun, and the
+distribution-shift explanation was *not* unaffected — it was the casualty. The
+"regression until the network is retrained" conclusion is withdrawn on both
+counts: there is no regression (+93 Elo once node multipliers are pinned) and
+retraining does not help (`PHASE2_GATE.md`, −81 Elo). The decomposition has now
+been measured on the current search; see the banner at the top of this file and
+the retraction under "Results".

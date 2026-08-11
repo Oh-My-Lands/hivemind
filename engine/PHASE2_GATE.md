@@ -42,7 +42,22 @@ Three things had to be true, and none were:
 3. **There are clocks.** `eval` parsed no `--time-control`, so `initialTimeDcs`
    stayed 0 and the margin never varied. The encoding under test was constant.
 
-If you are reusing this harness, check all three before spending money. The
+A fourth was missing for longer than that, and it invalidated the first run of
+this gate:
+
+4. **Both sides search the same number of nodes.** Until 2026-08-10
+   `ModelEvaluator::playGame` scaled the configured budget by
+   `ATTACKER_NODE_MULT = 0.5` for the team up on time and
+   `DEFENDER_NODE_MULT = 1.5` for the team down — a 3x swing keyed on
+   `team_may_sit(currentTeam)`, read live once clocks exist. `--nodes 800` never
+   meant 800. In *this* gate that knob is pointed straight at the treatment: the
+   thing under test is how a net handles the clock, so whichever arm was better
+   or worse at acquiring a time advantage had its search silently rescaled for
+   it. Both multipliers now default to 1.0 and are echoed in the header;
+   `--new-attacker-mult` / `--new-defender-mult` (and `--old-`) reproduce the old
+   behaviour if you need to.
+
+If you are reusing this harness, check all four before spending money. The
 failure mode is not an error; it is a plausible number.
 
 ## Running it
@@ -58,9 +73,11 @@ a network whose ONNX has a **dynamic batch dimension** — see below.
     --pgn gate.pgn --verbose
 ```
 
-Both encodings and the time control are echoed before the first game. Paste
-those three lines into whatever you write up; they are the difference between a
-result and a number.
+Both encodings, the time control, and the node multipliers are echoed before the
+first game. Paste those four lines into whatever you write up; they are the
+difference between a result and a number. The multipliers are the newest of the
+four and the reason the 2026-08-08 run had to be thrown away — a log that does
+not state them cannot be interpreted.
 
 Fixed **nodes**, not time — otherwise the match measures throughput. `--nodes
 800` and `--time-control 400` match the earlier clock A/B, so the two are
@@ -77,7 +94,10 @@ decided on the board, and at 1200 the clock split was only ~48 games (±7.2% in
 win rate). The earlier benchmark also needed two 1200-game runs pooled before
 its aggregate was significant, and doubling up front costs about $0.40.
 
-At 14.3 games/min on an RTX 3090, 2400 games is 2h47m.
+Measured, not estimated: 12.60 games/min on an RTX 3090 (190.5 min) and 17.84 on
+the 2026-08-10 pod (134.5 min). The original 14.3 games/min projection was
+optimistic by 14% against the 3090; budget 3h10m there and ~2h15m on faster
+silicon.
 
 ### The ONNX must be batchable
 
@@ -125,6 +145,9 @@ Phase 2 is that retraining. If the explanation was right, arm B should recover
 board play, not just flag wins — so the decomposition is the test of the
 mechanism, and the aggregate is only the accounting.
 
+**It was not right.** Once the node multipliers were pinned, arm B loses on the
+board as well as on the clock. See "Results".
+
 ### What the validation loss already says, and does not
 
 | | val_loss | policy_acc | value_acc_sign |
@@ -140,56 +163,86 @@ predict the match from these numbers.
 
 ## Results
 
-Run 2026-08-08 on an RTX 3090, 2400 games, 190.5 min at 12.60 games/min. The
-throughput estimate above (14.3 games/min, 2h47m) was optimistic by 14%; budget
-3h10m. Networks were the `-dyn` re-exports — the arms as first trained had a
-static batch dimension and TensorRT would not load them (`19ee114`).
+**Arm B loses to arm A by 81 Elo. The continuous encoding is not worth keeping on
+this evidence.**
+
+The gate has been run twice. The 2026-08-08 run reported +129 Elo for arm B and
+was wrong — it carried the 0.5x/1.5x node handicap described in prerequisite 4.
+The 2026-08-10 rerun changed nothing but those multipliers and reversed the
+result. Both are recorded below, because the size of the gap between them is the
+most useful thing this document now contains.
+
+| run | multipliers | arm B W–D–L | Elo | arm B mates | arm A mates | arm B flags | arm A flags |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 2026-08-08 | 0.5 / 1.5 | 1623–7–770 | +129 | 1611 | 701 | 17 | 140 |
+| **2026-08-10** | **1.0 / 1.0** | **921–7–1472** | **−81** | **893** | **1364** | **28** | **108** |
+
+Rerun: 2400 games, 134.5 min at 17.84 games/min, `--nodes 800 --time-control 400`,
+same `-dyn` networks. Header as echoed:
 
 ```
   New model encoding: continuous
   Old model encoding: binary
   Time control: 400 ds
+  Node multipliers: new att 1 / def 1, old att 1 / def 1
 ```
 
-| | arm B (continuous) | arm A (binary) | draws |
-|---|---:|---:|---:|
-| games | 1623 | 770 | 7 |
-
-Score 0.6777, **+129 Elo ± 7.1**. Colour-balanced: +817 −381 as White, +806 −389
-as Black. Game length averaged 56.7 plies (19 min, 100 max).
+Score 0.3852. Colour-balanced: +452 −744 as White, +469 −728 as Black. Game
+length averaged 59.4 plies (20 min, 97 max).
 
 ### The split
 
 | decided | arm B win rate | n | Elo |
 |---|---:|---:|---:|
-| on the board (checkmate) | 69.6% ± 1.0pp | 2306 | +144 |
-| on the clock (flag) | 19.5% ± 5.4pp | 87 | −246 |
+| on the board (checkmate) | 39.6% ± 1.0pp | 2257 | −74 |
+| on the clock (flag) | 20.6% ± 4.3pp | 136 | −235 |
 
-**The mechanism prediction holds.** `CLOCK_AB_BENCHMARK.md` concluded that
-clock-aware search lost on the board because the network was trained with time
-advantage as a fixed binary sign bit, and that it was "a regression until the
-network is retrained to match". Retrained to match, arm B gains 144 Elo *on the
-board*. It is not winning by flag-farming, which was the outcome that would have
-made the aggregate meaningless. The board split is also 20× better powered than
-the clock split and carries 96% of the games; it, not the +129, is the result.
+**The board result inverted; the clock result did not.** Arm B went from 69.6% of
+mates to 39.6% — a 210 Elo swing on the aggregate — while the flag split moved
+only from 19.5% to 20.6%, well inside its own error bar. That asymmetry is the
+whole story. Arm B loses the clock race, so under the old multipliers it was the
+1.5x defender in nearly every game while arm A was throttled to 0.5x; the board
+"win" was reading that node surplus, and the flag losses were the one measurement
+the handicap could not flatter, because they are what caused it.
 
-**The clock split inverts, and it is not noise.** Arm B loses flag games 70–17,
-19.5% ± 5.4pp, about 5.6 SE from even. The encoding built to make the sit margin
-legible made the engine measurably worse at the one class of game the margin
-directly governs. It costs little here — 3.6% of games, so splitting those 87
-evenly instead would raise the aggregate only to +137 — but it is unexplained, and it is the open
-question this match leaves behind rather than closes. The 70 games arm B lost on
-time are in `gate.pgn`; the thing to separate is whether B sits longer per move
-or simply plays longer games into the same flag.
+**So the mechanism prediction failed.** `CLOCK_AB_BENCHMARK.md` predicted that
+retraining the network to match a clock-aware search would recover board play.
+Retrained to match, arm B is *worse* on the board at equal nodes. Whatever the
+continuous margin does for the policy head in training does not survive contact
+with search at 800 nodes.
 
-**The value head is untouched.** Arm B's training gain was entirely in the policy
-head (`val_loss` 0.9490 → 0.8584, `policy_acc` 0.688 → 0.720, `value_acc_sign`
-0.6485 → 0.6488), and the match does not change what that implies: the severity
-bands read the value head, so nothing here says the bands improve. Sitting is a
-`pass` move and a finer margin helping the policy that chooses it is the expected
-shape. Board play improved anyway, which is what makes the result worth having.
+**The clock finding is the survivor, and it is now the only finding.** Arm B loses
+flag games 108–28, 20.6% ± 4.3pp, ~6.9 SE from even and better powered than the
+2026-08-08 version of the same claim. The encoding built to make the sit margin
+legible makes the engine worse at the one class of game the margin directly
+governs — and it no longer has a board-play gain sitting next to it as
+compensation. The thing to separate is still whether B sits longer per move or
+plays longer games into the same flag; the games are in
+`.logs/multfix-20260810/gate.pgn`.
 
-Artifacts: `.logs/phase2-gate-20260808/` (`gate.pgn`, `gate.log`, `gate.sh`,
-`make_dynamic.py`, smoke run, build log). The repaired networks are
-`weights/phase2-{binary,continuous}/*-v3.0-dyn.onnx`; the static-batch exports
-beside them will not load and should not be used.
+**The value head was untouched throughout.** Arm B's training gain was entirely
+in the policy head (`val_loss` 0.9490 → 0.8584, `policy_acc` 0.688 → 0.720,
+`value_acc_sign` 0.6485 → 0.6488). The severity bands read the value head, so
+nothing in either run says the bands improve. What changed is that the 2026-08-08
+write-up could point to board play as the reason to keep the arm anyway. That
+reason is gone.
+
+### Scope of the −81
+
+800 nodes only. This net family's ranking has reversed between 800 and 3200 nodes
+before, and a rerun at 3200 has not been done — at that budget the clock decides
+most games before the board does, which is the separate harness problem
+`--equal-time` exists for. Do not quote −81 as an unqualified strength
+difference; quote it as an 800-node result, the same way +129 should have been.
+
+Artifacts:
+- **`.logs/multfix-20260810/`** — the run that stands (`gate.sh`, `gate.log`,
+  `gate.pgn`, `out-driver.log`, `build.log`). Checksum-verified off the pod
+  before it was stopped.
+- `.logs/phase2-gate-20260808/` — the retracted run (`gate.pgn`, `gate.log`,
+  `gate.sh`, `make_dynamic.py`, smoke run, build log). Kept for the comparison;
+  its `gate.log` states +129 with no record of the multipliers, which is what
+  made the error survive for two days.
+
+The repaired networks are `weights/phase2-{binary,continuous}/*-v3.0-dyn.onnx`;
+the static-batch exports beside them will not load and should not be used.

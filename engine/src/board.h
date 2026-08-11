@@ -223,8 +223,46 @@ class Board {
             return TimeControl::team_flagged(clocks, actingTeam == WHITE_TEAM);
         }
 
-        /// Charges (sign +1) or refunds (sign -1) one ply on `board`.
+        /// Charges (sign +1) or refunds (sign -1) one ply on `board`, priced by
+        /// the model constants in TimeControl.
         void charge_clock(int board, Stockfish::Move move, int actingTeam, int sign);
+
+        /// As above, at a price the caller has already decided.
+        void charge_clock(int board, Stockfish::Move move, int actingTeam, int sign,
+                          int costDcs);
+
+        /**
+        * @brief Charges a joint action at a cost the caller decided, not the model.
+        *
+        * For virtual-time allocation, where a move's cost is the search it was
+        * actually given rather than TimeControl::MOVE_COST_DCS. Every board the
+        * acting team is on turn for pays `costDcs` -- the same shape as the flat
+        * model, which also charges each on-turn board separately, because the
+        * team makes one decision and both of its clocks are running while it
+        * thinks.
+        *
+        * Call this *before* make_moves, while side_to_move still identifies who
+        * is paying, and then make the moves with NO_TEAM so they are not charged
+        * twice. Deliberately not folded into make_moves as an optional cost:
+        * unmake_moves would then have to refund a number it was never told, and
+        * the search's make/unmake pairs must stay exactly symmetric.
+        */
+        void charge_decision(Stockfish::Move moveA, Stockfish::Move moveB,
+                             int actingTeam, int costDcs);
+
+        /**
+        * @brief Deciseconds on the shorter of `actingTeam`'s two clocks.
+        *
+        * The minimum rather than the sum or the mean, for the same reason
+        * team_flagged is an OR: a team loses when *either* member runs out, so
+        * the member closer to flagging is the one whose time is actually scarce.
+        */
+        int team_min_clock(int actingTeam) const {
+            const bool teamIsWhite = (actingTeam == WHITE_TEAM);
+            const int a = clocks.get(0, TimeControl::member_is_white(teamIsWhite, 0));
+            const int b = clocks.get(1, TimeControl::member_is_white(teamIsWhite, 1));
+            return a < b ? a : b;
+        }
 
         /**
         * @brief Turns the clock model on, with all four clocks in deciseconds.

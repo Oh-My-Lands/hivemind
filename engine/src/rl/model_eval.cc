@@ -330,19 +330,53 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
         // Get search limits for current player
         size_t nodesForThisMove = currentSettings->nodesPerMove;
         int timeForThisMove = currentSettings->moveTimeMs;
-        
-        // Asymmetric node allocation (like selfplay):
-        // - Attacker (time advantage): 0.5x nodes to force efficient play
-        // - Defender (time disadvantage): 1.5x nodes for better defense
-        constexpr float ATTACKER_NODE_MULT = 0.5f;
-        constexpr float DEFENDER_NODE_MULT = 1.5f;
-        if (teamHasTimeAdvantage) {
-            nodesForThisMove = static_cast<size_t>(nodesForThisMove * ATTACKER_NODE_MULT);
+
+        // Under virtual-time allocation this move's clock cost is the search it
+        // was given, not TimeControl::MOVE_COST_DCS. Negative means "no decision
+        // to charge", and make_moves prices the ply from the model as before.
+        int decisionCostDcs = -1;
+
+        const TimeAlloc::Mode allocMode =
+            settings.usePlayerConfigs
+                ? (isPlayer1Turn ? settings.player1.allocation
+                                 : settings.player2.allocation)
+                : TimeAlloc::Mode::FIXED;
+
+        if (allocMode != TimeAlloc::Mode::FIXED && board.has_clocks()) {
+            TimeAlloc::Config allocCfg;
+            allocCfg.mode = allocMode;
+            allocCfg.nodesPerDecisecond = settings.nodesPerDecisecond;
+
+            // The player's own ply count, which is half the macro-ply: the two
+            // teams alternate, so each has moved about ply/2 times. The phase
+            // curve is indexed on own plies and feeding it `ply` would run the
+            // whole schedule at double speed.
+            const int ownPly = static_cast<int>(ply / 2);
+
+            nodesForThisMove = TimeAlloc::allocate_nodes(
+                board.team_min_clock(currentTeam), ownPly, allocCfg);
+            decisionCostDcs = TimeAlloc::cost_dcs(nodesForThisMove,
+                                                  allocCfg.nodesPerDecisecond);
+
+            // nodesPerMove is not consulted here, so a fixed-node time limit
+            // would silently win the race between the two budgets.
+            timeForThisMove = 0;
         } else {
-            nodesForThisMove = static_cast<size_t>(nodesForThisMove * DEFENDER_NODE_MULT);
+            // Asymmetric node allocation, inherited from selfplay. Both default
+            // to 1.0 now; see PlayerConfig for why they are not 0.5/1.5 anymore.
+            //
+            // Not applied in the allocation modes above, because a swing keyed on
+            // the time-advantage bool is itself an allocator and would be
+            // indistinguishable from whatever policy is under test.
+            const PlayerConfig& pc = isPlayer1Turn ? settings.player1 : settings.player2;
+            const float mult = teamHasTimeAdvantage ? pc.attackerNodeMultiplier
+                                                    : pc.defenderNodeMultiplier;
+            if (mult != 1.0f) {
+                nodesForThisMove = static_cast<size_t>(nodesForThisMove * mult);
+            }
+            nodesForThisMove = max(static_cast<size_t>(1), nodesForThisMove);
         }
-        nodesForThisMove = max(static_cast<size_t>(1), nodesForThisMove);
-        
+
         // Apply temperature decay like selfplay: start at configured temp, decay to 0
         float tempForThisMove = currentSettings->temperature;
         size_t decayMoves = currentSettings->temperatureDecayMoves;
@@ -413,7 +447,15 @@ GameResult ModelEvaluator::playGame(bool newModelIsWhite, size_t gameNumber) {
         // Apply the joint move
         // Charge the mover's clock. Without the acting team this is a no-op,
         // which is what leaves the clock-free arm behaving as it always did.
-        board.make_moves(moveA, moveB, currentTeam);
+        if (decisionCostDcs >= 0) {
+            // Charged first, while side_to_move still says who is on turn, then
+            // moved with NO_TEAM so make_moves does not price the ply a second
+            // time from the model.
+            board.charge_decision(moveA, moveB, currentTeam, decisionCostDcs);
+            board.make_moves(moveA, moveB, Board::NO_TEAM);
+        } else {
+            board.make_moves(moveA, moveB, currentTeam);
+        }
 
         // Clock annotation, seconds. With a clock model this is the real clock
         // for the player who just moved; the synthetic 180.0 countdown below is

@@ -339,7 +339,8 @@ bool Board::can_partner_provide_blocking_piece(int board_in_check, Stockfish::Co
 // The distinction that does matter is sitting versus not being on turn. Only the
 // team on turn on a board burns clock there, so a MOVE_NONE is charged only when
 // that board's side to move belongs to the acting team.
-void Board::charge_clock(int board, Stockfish::Move move, int actingTeam, int sign) {
+void Board::charge_clock(int board, Stockfish::Move move, int actingTeam, int sign,
+                         int costDcs) {
     if (actingTeam == NO_TEAM || !clocksEnabled) {
         return;
     }
@@ -353,10 +354,22 @@ void Board::charge_clock(int board, Stockfish::Move move, int actingTeam, int si
         if ((pos[board]->side_to_move() == Stockfish::WHITE) != mine) {
             return;
         }
-        clocks.charge(board, mine, sign * TimeControl::SIT_COST_DCS);
-        return;
     }
-    clocks.charge(board, mine, sign * TimeControl::MOVE_COST_DCS);
+    clocks.charge(board, mine, sign * costDcs);
+}
+
+void Board::charge_clock(int board, Stockfish::Move move, int actingTeam, int sign) {
+    charge_clock(board, move, actingTeam, sign,
+                 move == Stockfish::MOVE_NONE ? TimeControl::SIT_COST_DCS
+                                              : TimeControl::MOVE_COST_DCS);
+}
+
+// Before do_move, exactly as make_moves charges, so side_to_move still says who
+// is on turn and the sit test reads the same for both models.
+void Board::charge_decision(Stockfish::Move moveA, Stockfish::Move moveB,
+                            int actingTeam, int costDcs) {
+    charge_clock(BOARD_A, moveA, actingTeam, +1, costDcs);
+    charge_clock(BOARD_B, moveB, actingTeam, +1, costDcs);
 }
 
 void Board::make_moves(Stockfish::Move moveA, Stockfish::Move moveB, int actingTeam) {

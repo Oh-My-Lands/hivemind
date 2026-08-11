@@ -265,7 +265,20 @@ void UCI::setoption(std::istringstream& is) {
         }
         std::cout << "info string TimeEncoding set to " << value << std::endl;
     } else if (name == "Clocks") {
-        // "Clocks" takes four deciseconds: A-White A-Black B-White B-Black.
+        // "Clocks" takes four deciseconds: A-White A-Black B-White B-Black,
+        // or "off" to leave the clock model and fall back to Mode's single bit.
+        //
+        // The off switch is not decoration. set_clocks() turns clocksEnabled on
+        // and nothing over UCI turned it back off, while ucinewgame only clears
+        // tree reuse -- so a process that ever saw clocks kept them for life. A
+        // long-lived engine serving mixed callers (deploy/runpod/handler.py
+        // holds one process across jobs) would then answer a clock-less request
+        // against whatever clocks the previous caller happened to leave behind.
+        if (value == "off") {
+            board.set_clocks_visible(false);
+            std::cout << "info string Clocks off (falling back to Mode)" << std::endl;
+            return;
+        }
         // `value` above only captured the first token, so re-read the rest.
         int parsed[4] = {0, 0, 0, 0};
         parsed[0] = std::atoi(value.c_str());
@@ -277,7 +290,8 @@ void UCI::setoption(std::istringstream& is) {
         }
         if (!ok) {
             std::cout << "info string Clocks ignored: expected four integers "
-                         "(A-White A-Black B-White B-Black, deciseconds)" << std::endl;
+                         "(A-White A-Black B-White B-Black, deciseconds) or off"
+                      << std::endl;
             return;
         }
         board.set_clocks(parsed[0], parsed[1], parsed[2], parsed[3]);
@@ -295,8 +309,8 @@ void UCI::send_uci_response() {
     cout << "option name Team type combo default white var white var black" << endl;
     cout << "option name Mode type combo default go var sit var go" << endl;
     cout << "option name TimeEncoding type combo default binary var binary var continuous" << endl;
-    // Four deciseconds: A-White A-Black B-White B-Black. Unset means no clock
-    // model, and the engine falls back to Mode's single global bit.
+    // Four deciseconds: A-White A-Black B-White B-Black, or "off". Unset means
+    // no clock model, and the engine falls back to Mode's single global bit.
     cout << "option name Clocks type string default" << endl;
     cout << "uciok" << endl;
 }

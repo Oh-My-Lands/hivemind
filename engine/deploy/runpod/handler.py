@@ -97,6 +97,45 @@ def search_timeout_seconds(movetime: int = None, nodes: int = None) -> float:
     return (search_time_ms / 1000) + SEARCH_TIMEOUT_BUFFER_S
 
 
+def _parse_clocks(raw: Any) -> Optional[List[int]]:
+    """
+    Validate the caller's `clocks` into four deciseconds, or None.
+
+    Order is A-White A-Black B-White B-Black, matching the engine's Clocks
+    option. None means "no clock model" and the caller falls back to Mode.
+
+    Rejected rather than coerced, because a half-understood clock vector is
+    worse than none: the engine reads sit permission and flag-terminality off
+    these numbers, so a silently-truncated or misordered quartet produces
+    confident evaluations of a position nobody is in. A caller that gets this
+    wrong should see Mode behaviour and a log line, not a plausible answer.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        try:
+            raw = [raw["aWhite"], raw["aBlack"], raw["bWhite"], raw["bBlack"]]
+        except KeyError:
+            print(f"clocks ignored: dict needs aWhite/aBlack/bWhite/bBlack, got {sorted(raw)}",
+                  flush=True)
+            return None
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        print(f"clocks ignored: expected four values, got {raw!r}", flush=True)
+        return None
+    out = []
+    for c in raw:
+        # bool is an int subclass; a caller passing True here has confused this
+        # with the old boolean mode and must not land on "1 decisecond".
+        if isinstance(c, bool) or not isinstance(c, (int, float)):
+            print(f"clocks ignored: non-numeric entry {c!r}", flush=True)
+            return None
+        if c < 0:
+            print(f"clocks ignored: negative entry {c!r}", flush=True)
+            return None
+        out.append(int(c))
+    return out
+
+
 class HivemindEngine:
     """Manages a Hivemind UCI engine session for bughouse."""
     
@@ -113,7 +152,12 @@ class HivemindEngine:
         self.reader_thread: Optional[threading.Thread] = None
         self.running = False
         # Tracked so a Mode change can force a fresh tree; see handler().
+        # None while the clock model is driving, since Mode is unused then.
         self.current_mode: Optional[str] = None
+        # Whether this process last ran with a clock model. The engine latches
+        # clocks on and never clears them by itself, so leaving the clock model
+        # has to be an explicit "Clocks off"; see handler().
+        self.clocks_active: bool = False
         
     def _reader_worker(self):
         """Background thread to read engine output."""
@@ -618,14 +662,38 @@ async def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         team = job_input.get("team", "white")
         engine.set_option("Team", team)
 
-        # Mode feeds an NN input plane and is hashed into the position key, so a
-        # change invalidates any retained tree. Reusing one across a change would
-        # mix evaluations made under two different rule sets.
-        mode = job_input.get("mode", "go")
-        if engine.current_mode is not None and engine.current_mode != mode:
-            engine.new_game()
-        engine.set_option("Mode", mode)
-        engine.current_mode = mode
+        # Real clocks if the caller has them, the old single bit if not.
+        #
+        # `clocks` is four deciseconds -- A-White A-Black B-White B-Black -- and
+        # gives the engine the quantity it actually wants. `mode` is the legacy
+        # path: one boolean for the whole team, which the caller had to
+        # manufacture by thresholding those same clocks. Both are accepted, and
+        # clocks win when present.
+        #
+        # Note the asymmetry in tree handling. A Mode change must invalidate the
+        # tree by hand, because Mode is a search-wide bool that is not part of
+        # the position key. Clocks are: Board::search_hash_key folds the sit
+        # margins in (bucketed, so near-identical clocks still transpose), so a
+        # clock change simply fails to match the retained root and the tree is
+        # rebuilt. Forcing new_game() on every clock change would throw away
+        # tree reuse on every single move for no correctness gain.
+        clocks = _parse_clocks(job_input.get("clocks"))
+        if clocks is not None:
+            engine.set_option("Clocks", " ".join(str(c) for c in clocks))
+            engine.current_mode = None
+        else:
+            # Leaving the clock model is explicit: set_clocks() latches
+            # clocksEnabled on and ucinewgame does not clear it, so a process
+            # that served a clocked request would otherwise answer this one
+            # against stale clocks.
+            if engine.clocks_active:
+                engine.set_option("Clocks", "off")
+            mode = job_input.get("mode", "go")
+            if engine.current_mode is not None and engine.current_mode != mode:
+                engine.new_game()
+            engine.set_option("Mode", mode)
+            engine.current_mode = mode
+        engine.clocks_active = clocks is not None
 
         # How many candidate moves to rank. `multipv: true` is still accepted
         # for callers written against the old boolean flag.
